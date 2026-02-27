@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autopodcast"
+version = "0.1.0"
+description = "Automatic rough-cut podcast editing based on speaker activity detection"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0,<2.0",
+    "soundfile>=0.12.0",
+    "click>=8.1.0",
+]
+
+[project.scripts]
+autopodcast = "autopodcast.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
