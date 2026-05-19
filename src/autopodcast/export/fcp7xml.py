@@ -41,8 +41,18 @@ def _make_timecode(parent: ET.Element, fps: float) -> ET.Element:
 
 
 def _make_pathurl(filepath: str) -> str:
-    """Create cross-platform pathurl using Path.as_uri()."""
-    return Path(filepath).as_uri()
+    """Create file:/// URI from filepath, cross-platform.
+
+    Path.as_uri() fails on Windows for Unix-style paths like '/cam/file.mp4'
+    because WindowsPath requires a drive letter for is_absolute().
+    We build the URI manually using PurePosixPath instead.
+    """
+    from pathlib import PurePosixPath
+    from urllib.parse import quote
+    posix = PurePosixPath(Path(filepath).as_posix()).as_posix()
+    if not posix.startswith("/"):
+        posix = "/" + posix
+    return "file://" + quote(posix, safe="/:@")
 
 
 def _make_file_definition(
@@ -52,11 +62,12 @@ def _make_file_definition(
     duration_frames: int,
     fps: float,
     media_type: str = "video",
+    pathurl: str | None = None,
 ) -> ET.Element:
     """Create a full <file> definition element (first occurrence)."""
     file_el = ET.SubElement(parent, "file", id=file_id)
     ET.SubElement(file_el, "name").text = Path(filepath).name
-    ET.SubElement(file_el, "pathurl").text = _make_pathurl(filepath)
+    ET.SubElement(file_el, "pathurl").text = pathurl or _make_pathurl(filepath)
     _make_rate_element(file_el, fps)
     ET.SubElement(file_el, "duration").text = str(duration_frames)
 
@@ -90,6 +101,7 @@ def _make_clipitem(
     duration_frames: int,
     media_type: str,
     defined_files: set[str],
+    pathurl: str | None = None,
 ) -> ET.Element:
     """Create a <clipitem> in a track with file definition or back-reference."""
     clip = ET.SubElement(parent, "clipitem", id=clip_id)
@@ -103,7 +115,8 @@ def _make_clipitem(
 
     if file_id not in defined_files:
         _make_file_definition(
-            clip, file_id, filepath, duration_frames, fps, media_type
+            clip, file_id, filepath, duration_frames, fps, media_type,
+            pathurl=pathurl,
         )
         defined_files.add(file_id)
     else:
@@ -119,6 +132,12 @@ def generate_fcp7xml(
     sequence_name: str = "AutoPodcast Rough Cut",
     sequence_width: int = 1920,
     sequence_height: int = 1080,
+    camera_pathurls: list[str] | None = None,
+    audio_pathurls: list[str] | None = None,
+    camera_fps: list[float] | None = None,
+    audio_fps: list[float] | None = None,
+    camera_source_in_s: list[float] | None = None,
+    audio_source_in_s: list[float] | None = None,
 ) -> str:
     """Generate FCP 7 XML string from a Timeline.
 
@@ -129,6 +148,12 @@ def generate_fcp7xml(
         sequence_name: Name for the sequence.
         sequence_width: Video width in pixels.
         sequence_height: Video height in pixels.
+        camera_pathurls: Optional original pathurls for camera files (from input XML).
+        audio_pathurls: Optional original pathurls for audio files (from input XML).
+        camera_fps: Optional per-camera fps (clip native rate). When None, uses timeline.fps.
+        audio_fps: Optional per-audio-track fps (clip native rate). When None, uses timeline.fps.
+        camera_source_in_s: Optional per-camera source offset in seconds (from input XML trim).
+        audio_source_in_s: Optional per-audio source offset in seconds (from input XML trim).
 
     Returns:
         XML string ready to write to file.
@@ -162,42 +187,86 @@ def generate_fcp7xml(
     ET.SubElement(vid_sc, "pixelaspectratio").text = "Square"
     _make_rate_element(vid_sc, fps)
 
-    # Video track
-    video_track = ET.SubElement(video_section, "track")
-    ET.SubElement(video_track, "enabled").text = "TRUE"
-    ET.SubElement(video_track, "locked").text = "FALSE"
-
     # Map camera index -> file info
     file_ids: dict[int, str] = {}
     for cam_idx, cam_path in enumerate(camera_paths):
         file_ids[cam_idx] = f"file-cam{cam_idx}"
 
-    # Create clip items for each segment
-    for seg_idx, seg in enumerate(timeline.segments):
-        cam_idx = seg.camera_index
-        if cam_idx >= len(camera_paths):
-            cam_idx = 0
+    # Video tracks: bottom track is continuous background,
+    # upper tracks only have clips where their camera is active.
+    # This eliminates disabled microclips in Premiere.
+    for track_cam_idx in range(len(camera_paths)):
+        video_track = ET.SubElement(video_section, "track")
+        ET.SubElement(video_track, "enabled").text = "TRUE"
+        ET.SubElement(video_track, "locked").text = "FALSE"
 
-        file_id = file_ids.get(cam_idx, file_ids.get(0, "file-cam0"))
+        file_id = file_ids[track_cam_idx]
+        filepath = camera_paths[track_cam_idx]
 
-        start_frame = seconds_to_frames(seg.start_s, fps)
-        end_frame = seconds_to_frames(seg.end_s, fps)
+        cam_pathurl = None
+        if camera_pathurls and track_cam_idx < len(camera_pathurls):
+            cam_pathurl = camera_pathurls[track_cam_idx]
 
-        _make_clipitem(
-            video_track,
-            clip_id=f"clipitem-v{seg_idx}",
-            name=f"Cam{cam_idx} - {seg.speaker_state.value}",
-            start_frame=start_frame,
-            end_frame=end_frame,
-            in_frame=start_frame,
-            out_frame=end_frame,
-            fps=fps,
-            file_id=file_id,
-            filepath=camera_paths[cam_idx],
-            duration_frames=total_frames,
-            media_type="video",
-            defined_files=defined_files,
-        )
+        clip_fps = camera_fps[track_cam_idx] if camera_fps else fps
+        total_clip_frames = seconds_to_frames(timeline.total_duration_s, clip_fps)
+        source_offset = camera_source_in_s[track_cam_idx] if camera_source_in_s else 0.0
+
+        if track_cam_idx == 0:
+            # Bottom track: continuous clip as background plate
+            _make_clipitem(
+                video_track,
+                clip_id=f"clipitem-v0-bg",
+                name=Path(filepath).stem,
+                start_frame=0,
+                end_frame=seconds_to_frames(timeline.total_duration_s, fps),
+                in_frame=seconds_to_frames(source_offset, clip_fps),
+                out_frame=seconds_to_frames(
+                    timeline.total_duration_s + source_offset, clip_fps,
+                ),
+                fps=clip_fps,
+                file_id=file_id,
+                filepath=filepath,
+                duration_frames=total_clip_frames,
+                media_type="video",
+                defined_files=defined_files,
+                pathurl=cam_pathurl,
+            )
+        else:
+            # Upper tracks: only output clips where this camera is active.
+            # Merge consecutive active segments into single clips.
+            runs: list[tuple[float, float]] = []
+            for seg in timeline.segments:
+                active_cam = seg.camera_index
+                if active_cam >= len(camera_paths):
+                    active_cam = 0
+                if active_cam == track_cam_idx:
+                    if runs and abs(runs[-1][1] - seg.start_s) < 1e-6:
+                        # Extend previous run
+                        runs[-1] = (runs[-1][0], seg.end_s)
+                    else:
+                        runs.append((seg.start_s, seg.end_s))
+
+            for run_idx, (run_start, run_end) in enumerate(runs):
+                _make_clipitem(
+                    video_track,
+                    clip_id=f"clipitem-v{track_cam_idx}-{run_idx}",
+                    name=Path(filepath).stem,
+                    start_frame=seconds_to_frames(run_start, fps),
+                    end_frame=seconds_to_frames(run_end, fps),
+                    in_frame=seconds_to_frames(
+                        run_start + source_offset, clip_fps,
+                    ),
+                    out_frame=seconds_to_frames(
+                        run_end + source_offset, clip_fps,
+                    ),
+                    fps=clip_fps,
+                    file_id=file_id,
+                    filepath=filepath,
+                    duration_frames=total_clip_frames,
+                    media_type="video",
+                    defined_files=defined_files,
+                    pathurl=cam_pathurl,
+                )
 
     # --- Audio section ---
     if audio_paths:
@@ -223,21 +292,32 @@ def generate_fcp7xml(
 
             file_id = f"file-audio{track_idx}"
 
+            aud_pathurl = None
+            if audio_pathurls and track_idx < len(audio_pathurls):
+                aud_pathurl = audio_pathurls[track_idx]
+
+            clip_fps = audio_fps[track_idx] if audio_fps else fps
+            total_clip_frames = seconds_to_frames(timeline.total_duration_s, clip_fps)
+
             # Single clip spanning entire duration
+            aud_source_offset = audio_source_in_s[track_idx] if audio_source_in_s else 0.0
+            aud_in_frame = seconds_to_frames(aud_source_offset, clip_fps)
+            aud_out_frame = seconds_to_frames(timeline.total_duration_s + aud_source_offset, clip_fps)
             clip = _make_clipitem(
                 audio_track,
                 clip_id=f"clipitem-a{track_idx}",
                 name=Path(audio_path).stem,
                 start_frame=0,
                 end_frame=total_frames,
-                in_frame=0,
-                out_frame=total_frames,
-                fps=fps,
+                in_frame=aud_in_frame,
+                out_frame=aud_out_frame,
+                fps=clip_fps,
                 file_id=file_id,
                 filepath=audio_path,
-                duration_frames=total_frames,
+                duration_frames=total_clip_frames,
                 media_type="audio",
                 defined_files=defined_files,
+                pathurl=aud_pathurl,
             )
 
             # Add ducking keyframes if present
@@ -245,7 +325,7 @@ def generate_fcp7xml(
                 e for e in timeline.ducking_events if e.track_index == track_idx
             ]
             if track_events:
-                _add_volume_filter(clip, track_events, fps, total_frames)
+                _add_volume_filter(clip, track_events, clip_fps, total_clip_frames)
 
     # Generate XML string
     tree = ET.ElementTree(root)
@@ -281,6 +361,8 @@ def _add_volume_filter(
         # FCP uses linear scale: 0 dB = 1.0, -12 dB ≈ 0.25
         linear = 10.0 ** (event.target_db / 20.0)
         ET.SubElement(keyframe, "value").text = f"{linear:.4f}"
+        interp = ET.SubElement(keyframe, "interpolation")
+        ET.SubElement(interp, "name").text = "Linear"
 
 
 def save_fcp7xml(
@@ -291,10 +373,17 @@ def save_fcp7xml(
     sequence_name: str = "AutoPodcast Rough Cut",
     sequence_width: int = 1920,
     sequence_height: int = 1080,
+    camera_pathurls: list[str] | None = None,
+    audio_pathurls: list[str] | None = None,
+    camera_fps: list[float] | None = None,
+    audio_fps: list[float] | None = None,
+    camera_source_in_s: list[float] | None = None,
+    audio_source_in_s: list[float] | None = None,
 ) -> None:
     """Generate and save FCP 7 XML to file."""
     xml_str = generate_fcp7xml(
         timeline, camera_paths, audio_paths, sequence_name,
-        sequence_width, sequence_height,
+        sequence_width, sequence_height, camera_pathurls, audio_pathurls,
+        camera_fps, audio_fps, camera_source_in_s, audio_source_in_s,
     )
     output_path.write_text(xml_str, encoding="utf-8")

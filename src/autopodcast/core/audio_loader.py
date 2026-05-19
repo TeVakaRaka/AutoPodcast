@@ -13,11 +13,29 @@ AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".mp3", ".aac"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".mxf", ".ts"}
 
 
-def load_audio(path: Path, target_sr: int = 16000) -> np.ndarray:
+def _resolve_path(path: Path, search_dir: Path | None) -> Path:
+    """Resolve a media file path, searching in search_dir if the original doesn't exist."""
+    if path.exists():
+        return path
+    if search_dir is not None:
+        found = list(search_dir.rglob(path.name))
+        if found:
+            return found[0]
+    locations = [str(path)]
+    if search_dir is not None:
+        locations.append(f"{search_dir} (recursive)")
+    raise FileNotFoundError(
+        f"File not found: {path.name}\nSearched in:\n" + "\n".join(f"  - {loc}" for loc in locations)
+    )
+
+
+def load_audio(path: Path, target_sr: int = 16000, search_dir: Path | None = None) -> np.ndarray:
     """Load audio from a file, returning mono float64 array at target_sr.
 
     If the file is a video, demuxes audio via ffmpeg first.
+    If the file doesn't exist and search_dir is given, looks for it there by filename.
     """
+    path = _resolve_path(path, search_dir)
     suffix = path.suffix.lower()
 
     if suffix in VIDEO_EXTENSIONS:
@@ -33,9 +51,9 @@ def load_audio(path: Path, target_sr: int = 16000) -> np.ndarray:
     return mono
 
 
-def load_and_align(paths: list[Path], target_sr: int = 16000) -> list[np.ndarray]:
+def load_and_align(paths: list[Path], target_sr: int = 16000, search_dir: Path | None = None) -> list[np.ndarray]:
     """Load multiple audio files and pad shorter ones to match the longest."""
-    arrays = [load_audio(p, target_sr) for p in paths]
+    arrays = [load_audio(p, target_sr, search_dir=search_dir) for p in paths]
 
     max_len = max(len(a) for a in arrays)
     result = []
@@ -48,6 +66,16 @@ def load_and_align(paths: list[Path], target_sr: int = 16000) -> list[np.ndarray
             result.append(a)
 
     return result
+
+
+def apply_offset(audio: np.ndarray, offset_s: float, sample_rate: int) -> np.ndarray:
+    """Trim the beginning of audio by offset_s seconds."""
+    if offset_s <= 0:
+        return audio
+    samples_to_skip = int(offset_s * sample_rate)
+    if samples_to_skip >= len(audio):
+        return np.zeros(0, dtype=audio.dtype)
+    return audio[samples_to_skip:]
 
 
 def _load_from_video(path: Path, target_sr: int) -> np.ndarray:
