@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from autopodcast.core.roles import normalize_speaker_role
 from autopodcast.models.project import AudioInput, CameraInput, ProjectConfig
 
 
@@ -33,4 +34,12 @@ def build_config(
         if value is not None and hasattr(config, key):
             object.__setattr__(config, key, value)
 
+    # Normalize speaker labels using role overrides and canonical map
+    for inp in config.audio_inputs:
+        resolved = config.speaker_role_overrides.get(inp.speaker_label)
+        if resolved is None:
+            resolved = normalize_speaker_role(inp.speaker_label)
+        inp.speaker_label = resolved
+
+    config.validate()
     return config

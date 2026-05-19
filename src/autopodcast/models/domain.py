@@ -17,6 +17,7 @@ class AnalysisFrame:
     rms_db: float
     envelope_db: float
     is_active: bool
+    peak_db: float = -100.0
 
 
 @dataclass
@@ -27,6 +28,19 @@ class SpeakerActivity:
 
 @dataclass
 class Segment:
+    start_s: float
+    end_s: float
+    camera_index: int
+    speaker_state: SpeakerState
+    speaker_label: str | None = None
+
+    @property
+    def duration_s(self) -> float:
+        return self.end_s - self.start_s
+
+
+@dataclass
+class CameraEvent:
     start_s: float
     end_s: float
     camera_index: int

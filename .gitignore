@@ -8,9 +8,26 @@ build/
 
 # Virtual environment
 .venv/
+.verify-venv/
 
 # Testing
 .pytest_cache/
 
+# Build
+_build/
+ffmpeg/
+release/
+
 # OS
 .DS_Store
+
+# Editors / workspaces
+.idea/
+.vscode/
+.obsidian/
+.claude/
+
+# Project-local artifacts
+=*
+Без названия.base
+

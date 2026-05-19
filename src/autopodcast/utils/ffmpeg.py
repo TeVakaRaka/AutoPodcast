@@ -17,6 +17,11 @@ def _find_tool(name: str) -> str:
     1. System PATH via shutil.which
     2. Common Windows install locations
     """
+    if getattr(sys, 'frozen', False):
+        bundled = Path(sys.executable).parent / f"{name}.exe"
+        if bundled.is_file():
+            return str(bundled)
+
     found = shutil.which(name)
     if found:
         return found
