@@ -16,6 +16,7 @@ from autopodcast.config import build_config
 from autopodcast.core.analyzer import analyze_speaker
 from autopodcast.core.audio_loader import load_and_align
 from autopodcast.core.audio_sources import resolve_sequence_audio_sources
+from autopodcast.core.cross_cancel import CrossCancelConfig, cross_cancel
 from autopodcast.core.auto_switch_4cams import (
     ParticipantSpec,
     Roundtable4CamConfig,
@@ -53,6 +54,56 @@ from autopodcast.export.json_export import load_timeline, save_timeline
 from autopodcast.import_xml import parse_premiere_xml
 from autopodcast.models.domain import Timeline
 from autopodcast.models.project import AudioInput, ProjectConfig
+
+
+def _maybe_apply_cross_cancel(
+    audio_arrays: list[np.ndarray],
+    sample_rate: int,
+    enabled: bool,
+    fir_taps: int,
+) -> list[np.ndarray]:
+    """Pre-process raw mic tracks with Wiener-Hopf cross-channel cancellation.
+
+    When ``enabled`` is False or only one track is present, returns the input
+    unchanged. Otherwise fits a per-pair FIR filter on solo-speaker segments
+    and subtracts the predicted bleed from each channel before the RMS / VAD
+    detector sees it. Goal: suppress fake speaker activations caused by
+    cross-talk between mics during long silences on one side.
+    """
+    if not enabled or len(audio_arrays) < 2:
+        return audio_arrays
+    return cross_cancel(
+        audio_arrays,
+        sample_rate,
+        CrossCancelConfig(fir_taps=fir_taps),
+    )
+
+
+def _cross_cancel_options(default_enabled: bool = False):
+    """Decorator factory: add --cross-cancel / --cross-cancel-fir-taps options.
+
+    ``default_enabled`` controls whether cross-channel cancellation runs by
+    default. The 1-host-1-guest ``auto-multicam`` command enables it, because
+    mic bleed there routinely makes the detector report 'both speakers' and
+    pins the camera on the wide shot. Other commands keep it opt-in.
+    """
+    def deco(f):
+        f = click.option(
+            "--cross-cancel-fir-taps",
+            default=256,
+            type=int,
+            show_default=True,
+            help="FIR filter length (samples) for cross-channel cancellation. 256 ≈ 16 ms at 16 kHz.",
+        )(f)
+        f = click.option(
+            "--cross-cancel/--no-cross-cancel",
+            "enable_cross_cancel",
+            default=default_enabled,
+            show_default=True,
+            help="Subtract per-pair mic bleed estimates before speech detection (recommended for multi-mic setups with audible cross-talk).",
+        )(f)
+        return f
+    return deco
 
 
 def _parse_role_overrides(overrides: tuple[str, ...]) -> dict[str, str]:
@@ -283,6 +334,7 @@ def cli():
 @click.option("--vad-min-speech-ms", default=120.0, type=float, help="Silero VAD minimum speech duration in ms")
 @click.option("--vad-min-silence-ms", default=80.0, type=float, help="Silero VAD minimum silence duration in ms")
 @click.option("--vad-speech-pad-ms", default=30.0, type=float, help="Silero VAD padding around detected speech in ms")
+@_cross_cancel_options()
 def analyze(
     audio_a, label_a, camera_a,
     audio_b, label_b, camera_b,
@@ -294,6 +346,7 @@ def analyze(
     gate_fade, long_talk_mode, wide_cooldown,
     dialogue_wide_interval, dialogue_wide_duration, dialogue_wide_min_turns, role_override,
     detector_backend, vad_threshold, vad_min_speech_ms, vad_min_silence_ms, vad_speech_pad_ms,
+    enable_cross_cancel, cross_cancel_fir_taps,
 ):
     """Analyze audio and generate a timeline."""
     # Validate 1-based angles
@@ -345,6 +398,16 @@ def analyze(
     duration_s = len(audio_arrays[0]) / config.sample_rate
 
     click.echo(f"Duration: {duration_s:.1f}s")
+    audio_arrays = list(
+        _maybe_apply_cross_cancel(
+            audio_arrays,
+            config.sample_rate,
+            enabled=enable_cross_cancel,
+            fir_taps=cross_cancel_fir_taps,
+        )
+    )
+    if enable_cross_cancel:
+        click.echo(f"Cross-channel cancellation: fir_taps={cross_cancel_fir_taps}, channels={len(audio_arrays)}")
     click.echo("Analyzing speaker activity...")
 
     gain_a = config.input_gain_a_db or config.input_gain_db
@@ -485,6 +548,7 @@ def export(timeline, cam0, cam1, cam2, mic0, mic1, output, name, jsx):
 @click.option("--jsx/--no-jsx", default=False, help="Generate ExtendScript for multicam setup")
 @click.option("--media-dir", default=None, type=click.Path(exists=True, file_okay=False),
               help="Directory with media files (if paths in XML are invalid)")
+@_cross_cancel_options()
 def from_xml(
     xml_file, audio_a, audio_b, label_a, label_b, cam_wide, cam_host, cam_guest, output,
     speech_threshold, release_threshold,
@@ -496,6 +560,7 @@ def from_xml(
     detector_backend, vad_threshold, vad_min_speech_ms, vad_min_silence_ms, vad_speech_pad_ms,
     jsx,
     media_dir,
+    enable_cross_cancel, cross_cancel_fir_taps,
 ):
     """Analyze Premiere XML and generate rough-cut XML.
 
@@ -628,6 +693,16 @@ def from_xml(
     )
     duration_s = len(audio_arrays[0]) / config.sample_rate
     click.echo(f"Duration: {duration_s:.1f}s")
+    audio_arrays = list(
+        _maybe_apply_cross_cancel(
+            audio_arrays,
+            config.sample_rate,
+            enabled=enable_cross_cancel,
+            fir_taps=cross_cancel_fir_taps,
+        )
+    )
+    if enable_cross_cancel:
+        click.echo(f"Cross-channel cancellation: fir_taps={cross_cancel_fir_taps}, channels={len(audio_arrays)}")
 
     click.echo("Analyzing speaker activity...")
     gain_a = config.input_gain_a_db or config.input_gain_db
@@ -786,6 +861,7 @@ def calibrate(mic_a, mic_b, label_a, label_b, window, percentile, margin):
 @click.option("--mute-audio/--no-mute-audio", default=True, help="Mute inactive speaker mics")
 @click.option("--log/--no-log", default=True, help="Write JSONL log file next to output")
 @click.option("--fps", default=0.0, type=float, help="Sequence frame rate for frame-aligned cuts (0 = auto-detect)")
+@_cross_cancel_options()
 def auto_switch_4cams_cmd(
     in_file, seq, out_file,
     mic_host, mic_guest_1, mic_guest_2, mic_guest_3,
@@ -802,6 +878,7 @@ def auto_switch_4cams_cmd(
     reestablish_wide_interval, reestablish_wide_duration, reestablish_min_turns,
     motion_check, motion_hwaccel, xml_file,
     mute_audio, log, fps,
+    enable_cross_cancel, cross_cancel_fir_taps,
 ):
     """Full pipeline for 1 host + 3 guests + 4 cameras."""
     from .prproj_patcher import patch_prproj, read_audio_offsets, segments_to_cuts
@@ -921,6 +998,20 @@ def auto_switch_4cams_cmd(
 
     duration_s = max_len / analysis_config.sample_rate
     click.echo(f"Duration: {duration_s:.1f}s")
+
+    if enable_cross_cancel:
+        click.echo(
+            f"Cross-channel cancellation: fir_taps={cross_cancel_fir_taps}, "
+            f"channels={len(audio_arrays)}"
+        )
+        audio_arrays = list(
+            _maybe_apply_cross_cancel(
+                audio_arrays,
+                analysis_config.sample_rate,
+                enabled=True,
+                fir_taps=cross_cancel_fir_taps,
+            )
+        )
 
     activities = {}
     detector_diags = {}
@@ -1317,6 +1408,7 @@ def auto_switch_4cams_cmd(
 @click.option("--mute-audio/--no-mute-audio", default=True, help="Mute inactive speaker mics")
 @click.option("--log/--no-log", default=True, help="Write JSONL log file next to output")
 @click.option("--fps", default=0.0, type=float, help="Sequence frame rate for frame-aligned cuts (0 = auto-detect)")
+@_cross_cancel_options()
 def auto_switch_sakha_aimakh_cmd(
     in_file, seq, out_file,
     mic_main_host, mic_cohost, mic_guest,
@@ -1334,6 +1426,7 @@ def auto_switch_sakha_aimakh_cmd(
     audio_clean_mode,
     motion_check, motion_hwaccel, motion_speed, motion_cache, motion_cache_dir, xml_file,
     mute_audio, log, fps,
+    enable_cross_cancel, cross_cancel_fir_taps,
 ):
     """Full pipeline for SAKHA AYMAKH: 2 hosts + 1 guest + 4 cameras."""
     from .core.audio_loader import apply_offset
@@ -1527,6 +1620,20 @@ def auto_switch_sakha_aimakh_cmd(
 
     duration_s = max_len / analysis_config.sample_rate
     click.echo(f"Duration: {duration_s:.1f}s")
+
+    if enable_cross_cancel:
+        click.echo(
+            f"Cross-channel cancellation: fir_taps={cross_cancel_fir_taps}, "
+            f"channels={len(audio_arrays)}"
+        )
+        audio_arrays = list(
+            _maybe_apply_cross_cancel(
+                audio_arrays,
+                analysis_config.sample_rate,
+                enabled=True,
+                fir_taps=cross_cancel_fir_taps,
+            )
+        )
 
     activities = {}
     detector_diags = {}
@@ -1974,7 +2081,7 @@ def auto_switch_sakha_aimakh_cmd(
 @click.option("--mute-audio/--no-mute-audio", default=True, help="Mute inactive speaker mics (default: on)")
 @click.option("--cross-gate-db", default=6.0, type=float, help="Cross-gate threshold in dB (0 = disabled, default: 6)")
 @click.option("--detector-backend", default="auto", type=click.Choice(["auto", "rms", "silero"]), help="Speech detector backend")
-@click.option("--vad-threshold", default=0.5, type=float, help="Silero VAD speech probability threshold")
+@click.option("--vad-threshold", default=0.65, type=float, help="Silero VAD speech probability threshold (0.65 suppresses cross-talk from the other mic)")
 @click.option("--vad-min-speech-ms", default=120.0, type=float, help="Silero VAD minimum speech duration in ms")
 @click.option("--vad-min-silence-ms", default=80.0, type=float, help="Silero VAD minimum silence duration in ms")
 @click.option("--vad-speech-pad-ms", default=30.0, type=float, help="Silero VAD padding around detected speech in ms")
@@ -1988,6 +2095,7 @@ def auto_switch_sakha_aimakh_cmd(
 @click.option("--audio-track-host", default=1, type=int, help="Audio track number for host (1-based, default: 1)")
 @click.option("--audio-track-guest", default=2, type=int, help="Audio track number for guest (1-based, default: 2)")
 @click.option("--fps", default=0.0, type=float, help="Sequence frame rate for frame-aligned cuts (0 = auto-detect from .prproj)")
+@_cross_cancel_options(default_enabled=True)
 def auto_multicam_cmd(
     in_file, mic_a, mic_b, seq, out_file,
     label_a, label_b,
@@ -1999,6 +2107,7 @@ def auto_multicam_cmd(
     dialogue_wide_interval, dialogue_wide_duration, dialogue_wide_min_turns, log,
     audio_track_host, audio_track_guest,
     fps,
+    enable_cross_cancel, cross_cancel_fir_taps,
 ):
     """Full pipeline: analyze audio → switch cameras → patch .prproj."""
     from .prproj_patcher import patch_prproj, segments_to_cuts, read_audio_offsets
@@ -2076,6 +2185,17 @@ def auto_multicam_cmd(
 
     duration_s = len(audio_arrays[0]) / config.sample_rate
     click.echo(f"Duration: {duration_s:.1f}s")
+
+    audio_arrays = list(
+        _maybe_apply_cross_cancel(
+            audio_arrays,
+            config.sample_rate,
+            enabled=enable_cross_cancel,
+            fir_taps=cross_cancel_fir_taps,
+        )
+    )
+    if enable_cross_cancel:
+        click.echo(f"Cross-channel cancellation: fir_taps={cross_cancel_fir_taps}, channels={len(audio_arrays)}")
 
     # 2. Detect speech activity
     click.echo("Analyzing speaker activity...")
