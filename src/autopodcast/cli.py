@@ -79,23 +79,31 @@ def _maybe_apply_cross_cancel(
     )
 
 
-def _cross_cancel_options(f):
-    """Decorator: add --cross-cancel / --cross-cancel-fir-taps to a command."""
-    f = click.option(
-        "--cross-cancel-fir-taps",
-        default=256,
-        type=int,
-        show_default=True,
-        help="FIR filter length (samples) for cross-channel cancellation. 256 ≈ 16 ms at 16 kHz.",
-    )(f)
-    f = click.option(
-        "--cross-cancel/--no-cross-cancel",
-        "enable_cross_cancel",
-        default=False,
-        show_default=True,
-        help="Subtract per-pair mic bleed estimates before speech detection (recommended for multi-mic setups with audible cross-talk).",
-    )(f)
-    return f
+def _cross_cancel_options(default_enabled: bool = False):
+    """Decorator factory: add --cross-cancel / --cross-cancel-fir-taps options.
+
+    ``default_enabled`` controls whether cross-channel cancellation runs by
+    default. The 1-host-1-guest ``auto-multicam`` command enables it, because
+    mic bleed there routinely makes the detector report 'both speakers' and
+    pins the camera on the wide shot. Other commands keep it opt-in.
+    """
+    def deco(f):
+        f = click.option(
+            "--cross-cancel-fir-taps",
+            default=256,
+            type=int,
+            show_default=True,
+            help="FIR filter length (samples) for cross-channel cancellation. 256 ≈ 16 ms at 16 kHz.",
+        )(f)
+        f = click.option(
+            "--cross-cancel/--no-cross-cancel",
+            "enable_cross_cancel",
+            default=default_enabled,
+            show_default=True,
+            help="Subtract per-pair mic bleed estimates before speech detection (recommended for multi-mic setups with audible cross-talk).",
+        )(f)
+        return f
+    return deco
 
 
 def _parse_role_overrides(overrides: tuple[str, ...]) -> dict[str, str]:
@@ -326,7 +334,7 @@ def cli():
 @click.option("--vad-min-speech-ms", default=120.0, type=float, help="Silero VAD minimum speech duration in ms")
 @click.option("--vad-min-silence-ms", default=80.0, type=float, help="Silero VAD minimum silence duration in ms")
 @click.option("--vad-speech-pad-ms", default=30.0, type=float, help="Silero VAD padding around detected speech in ms")
-@_cross_cancel_options
+@_cross_cancel_options()
 def analyze(
     audio_a, label_a, camera_a,
     audio_b, label_b, camera_b,
@@ -540,7 +548,7 @@ def export(timeline, cam0, cam1, cam2, mic0, mic1, output, name, jsx):
 @click.option("--jsx/--no-jsx", default=False, help="Generate ExtendScript for multicam setup")
 @click.option("--media-dir", default=None, type=click.Path(exists=True, file_okay=False),
               help="Directory with media files (if paths in XML are invalid)")
-@_cross_cancel_options
+@_cross_cancel_options()
 def from_xml(
     xml_file, audio_a, audio_b, label_a, label_b, cam_wide, cam_host, cam_guest, output,
     speech_threshold, release_threshold,
@@ -853,7 +861,7 @@ def calibrate(mic_a, mic_b, label_a, label_b, window, percentile, margin):
 @click.option("--mute-audio/--no-mute-audio", default=True, help="Mute inactive speaker mics")
 @click.option("--log/--no-log", default=True, help="Write JSONL log file next to output")
 @click.option("--fps", default=0.0, type=float, help="Sequence frame rate for frame-aligned cuts (0 = auto-detect)")
-@_cross_cancel_options
+@_cross_cancel_options()
 def auto_switch_4cams_cmd(
     in_file, seq, out_file,
     mic_host, mic_guest_1, mic_guest_2, mic_guest_3,
@@ -1400,7 +1408,7 @@ def auto_switch_4cams_cmd(
 @click.option("--mute-audio/--no-mute-audio", default=True, help="Mute inactive speaker mics")
 @click.option("--log/--no-log", default=True, help="Write JSONL log file next to output")
 @click.option("--fps", default=0.0, type=float, help="Sequence frame rate for frame-aligned cuts (0 = auto-detect)")
-@_cross_cancel_options
+@_cross_cancel_options()
 def auto_switch_sakha_aimakh_cmd(
     in_file, seq, out_file,
     mic_main_host, mic_cohost, mic_guest,
@@ -2073,7 +2081,7 @@ def auto_switch_sakha_aimakh_cmd(
 @click.option("--mute-audio/--no-mute-audio", default=True, help="Mute inactive speaker mics (default: on)")
 @click.option("--cross-gate-db", default=6.0, type=float, help="Cross-gate threshold in dB (0 = disabled, default: 6)")
 @click.option("--detector-backend", default="auto", type=click.Choice(["auto", "rms", "silero"]), help="Speech detector backend")
-@click.option("--vad-threshold", default=0.5, type=float, help="Silero VAD speech probability threshold")
+@click.option("--vad-threshold", default=0.65, type=float, help="Silero VAD speech probability threshold (0.65 suppresses cross-talk from the other mic)")
 @click.option("--vad-min-speech-ms", default=120.0, type=float, help="Silero VAD minimum speech duration in ms")
 @click.option("--vad-min-silence-ms", default=80.0, type=float, help="Silero VAD minimum silence duration in ms")
 @click.option("--vad-speech-pad-ms", default=30.0, type=float, help="Silero VAD padding around detected speech in ms")
@@ -2087,7 +2095,7 @@ def auto_switch_sakha_aimakh_cmd(
 @click.option("--audio-track-host", default=1, type=int, help="Audio track number for host (1-based, default: 1)")
 @click.option("--audio-track-guest", default=2, type=int, help="Audio track number for guest (1-based, default: 2)")
 @click.option("--fps", default=0.0, type=float, help="Sequence frame rate for frame-aligned cuts (0 = auto-detect from .prproj)")
-@_cross_cancel_options
+@_cross_cancel_options(default_enabled=True)
 def auto_multicam_cmd(
     in_file, mic_a, mic_b, seq, out_file,
     label_a, label_b,
