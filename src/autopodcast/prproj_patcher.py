@@ -505,6 +505,13 @@ def _split_audio_track_item(
             "enabled": seg0_enabled,
         })
 
+    # The AudioComponentChain carries no per-segment state: mute lives on the
+    # ClipTrackItem, in/out points on the AudioClip. Every segment of one clip
+    # therefore needs an identical chain. Share the original chain by reference
+    # instead of deep-copying it per segment — the per-segment deepcopy used to
+    # bloat the .prproj badly on long and/or multi-component audio.
+    shared_comp_chain_oid = orig_comp_chain.get("ObjectID")
+
     # Create new elements for segments 1..N via deep copy
     for seg_idx, (seg_start, seg_end, enabled) in enumerate(full_segments[1:], 1):
         new_src_in = orig_in_point + (seg_start - orig_start)
@@ -517,17 +524,14 @@ def _split_audio_track_item(
         _check_segment_invariants(seg_start, seg_end, new_src_in, new_src_out, seg_idx)
 
         # Allocate ObjectIDs
-        comp_chain_oid = str(next_oid); next_oid += 1
         subclip_oid = str(next_oid); next_oid += 1
         audio_clip_oid = str(next_oid); next_oid += 1
         track_item_oid = str(next_oid); next_oid += 1
 
         node_id = next_node_id; next_node_id += 1
 
-        # Deep copy AudioComponentChain — preserve all fields, change ObjectID
-        new_comp = copy.deepcopy(orig_comp_chain)
-        new_comp.set("ObjectID", comp_chain_oid)
-        root.append(new_comp)
+        # No new AudioComponentChain is created — every segment references the
+        # original chain (see shared_comp_chain_oid above).
 
         # Deep copy AudioClip — change ObjectID, ClipID, InPoint, OutPoint
         new_clip = copy.deepcopy(orig_clip)
@@ -566,7 +570,7 @@ def _split_audio_track_item(
         comp_found = new_item.find(".//Components")
         if comp_found is None:
             raise ValueError(f"Audio seg {seg_idx}: missing Components in deep copy")
-        comp_found.set("ObjectRef", comp_chain_oid)
+        comp_found.set("ObjectRef", shared_comp_chain_oid)
 
         # Node/ID — create if missing (needed for unique node identification)
         node_el = new_item.find(".//Node")
