@@ -2,6 +2,23 @@
 
 This archive is prepared for checking tests and building `autopodcast.exe` on Windows.
 
+## Automatic builds (no local build needed)
+
+A GitHub Actions workflow (`.github/workflows/build-windows.yml`) builds a
+ready-to-run `autopodcast.exe` on a Windows runner on every push to `main`
+or `claude/release-build`, and can also be triggered manually from the
+repository's **Actions** tab (`Build Windows EXE` → `Run workflow`).
+
+To get the latest build without building anything locally:
+
+1. Open the repo on GitHub → **Actions** tab.
+2. Click the most recent `Build Windows EXE` run.
+3. Download the `autopodcast-windows` artifact at the bottom of the page.
+   It already contains `autopodcast.exe`, all dependencies, and bundled
+   `ffmpeg.exe` / `ffprobe.exe`.
+
+The sections below describe the manual local build, kept as a fallback.
+
 ## Requirements
 
 - Windows 10/11.
