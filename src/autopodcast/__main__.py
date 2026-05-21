@@ -1,7 +1,34 @@
 """Allow running as: python3 -m autopodcast"""
 
 import sys
+
+# On Windows the console defaults to a legacy code page (cp1251/cp1252) that
+# cannot encode the Cyrillic interactive-wizard text — that would crash even
+# `autopodcast.exe --help`. Switch the console and Python's own streams to
+# UTF-8 so console I/O never raises UnicodeEncodeError.
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    except Exception:
+        pass
+    for _stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 from autopodcast.cli import cli
+
+
+def _pause_before_exit(message: str) -> None:
+    """Wait for Enter so a double-clicked .exe window stays open long enough
+    to read the output. No-op when stdin is unavailable (CI, pipes)."""
+    try:
+        input(message)
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 def _run_wizard_command(args: list[str], out_file: str, base: str) -> int:
@@ -541,10 +568,11 @@ if getattr(sys, 'frozen', False) and len(sys.argv) <= 1:
         import traceback
         traceback.print_exc()
         print(f"\n*** ОШИБКА: {e} ***")
-    input("\nНажмите Enter для выхода...")
+    _pause_before_exit("\nНажмите Enter для выхода...")
 else:
     try:
         cli()
     except SystemExit:
         if getattr(sys, 'frozen', False):
-            input("\nPress Enter to exit / Нажмите Enter для выхода...")
+            _pause_before_exit("\nPress Enter to exit / Нажмите Enter для выхода...")
+        raise
