@@ -93,7 +93,7 @@ def _cross_cancel_options(default_enabled: bool = False):
             default=256,
             type=int,
             show_default=True,
-            help="FIR filter length (samples) for cross-channel cancellation. 256 ≈ 16 ms at 16 kHz.",
+            help="FIR filter length (samples) for cross-channel cancellation. 256 ~ 16 ms at 16 kHz.",
         )(f)
         f = click.option(
             "--cross-cancel/--no-cross-cancel",
@@ -297,7 +297,7 @@ def _append_jsonl_entry(path: Path, entry: dict) -> None:
 
 @click.group()
 def cli():
-    """AutoPodcast — automatic rough-cut podcast editing."""
+    """AutoPodcast - automatic rough-cut podcast editing."""
     pass
 
 
@@ -749,7 +749,7 @@ def from_xml(
     output_path = Path(output)
     save_fcp7xml(
         timeline, camera_paths, output_path, audio_paths,
-        sequence_name=f"{seq.name} — Rough Cut",
+        sequence_name=f"{seq.name} - Rough Cut",
         sequence_width=seq.width,
         sequence_height=seq.height,
         camera_pathurls=camera_pathurls,
@@ -765,7 +765,7 @@ def from_xml(
         from autopodcast.export.multicam_jsx import generate_multicam_jsx
         jsx_content = generate_multicam_jsx(
             str(output_path.resolve()), timeline,
-            sequence_name=f"{seq.name} — Rough Cut",
+            sequence_name=f"{seq.name} - Rough Cut",
         )
         jsx_path = output_path.with_suffix(".jsx")
         jsx_path.write_text(jsx_content, encoding="utf-8")
@@ -2109,7 +2109,7 @@ def auto_multicam_cmd(
     fps,
     enable_cross_cancel, cross_cancel_fir_taps,
 ):
-    """Full pipeline: analyze audio → switch cameras → patch .prproj."""
+    """Full pipeline: analyze audio -> switch cameras -> patch .prproj."""
     from .prproj_patcher import patch_prproj, segments_to_cuts, read_audio_offsets
     from .core.audio_loader import apply_offset
 
@@ -2358,7 +2358,7 @@ def auto_multicam_cmd(
         prelude_log_entries=log_prelude_entries if log else None,
         fps=fps,
     )
-    click.echo(f"Done: {n} segments → {out_file}")
+    click.echo(f"Done: {n} segments -> {out_file}")
     if log_path and log_path.exists():
         click.echo(f"Log: {log_path}")
 
@@ -2810,7 +2810,7 @@ def auto_switch_monologue_cmd(
                     "total_runtime_s": round(total_runtime_s, 3),
                 },
             )
-    click.echo(f"Done: {n} segments → {out_file}")
+    click.echo(f"Done: {n} segments -> {out_file}")
     click.echo(
         "Timings: "
         f"motion={motion_analysis_s:.1f}s, "
@@ -2837,4 +2837,4 @@ def patch_prproj_cmd(in_file, cuts, seq, out_file, fps):
         cuts_data = json.load(f)
 
     n = patch_prproj(Path(in_file), cuts_data, seq, Path(out_file), fps=fps)
-    click.echo(f"Patched: {n} segments → {out_file}")
+    click.echo(f"Patched: {n} segments -> {out_file}")
