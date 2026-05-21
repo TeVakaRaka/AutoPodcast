@@ -785,6 +785,59 @@ class TestAudioMute:
         # seg 1: enabled [30,100]
         assert guest_items[1] == (seconds_to_ticks(30), seconds_to_ticks(100), False)
 
+    def test_audio_split_shares_component_chain(self, tmp_path):
+        """AudioComponentChain must be shared by reference across all segments
+        of a track, not deep-copied per segment.
+
+        Regression guard for the .prproj bloat that froze Premiere timelines
+        on long projects: each audio segment used to clone the full chain, so
+        the object count grew linearly with the number of segments.
+        """
+        in_path = tmp_path / "test.prproj"
+        out_path = tmp_path / "patched.prproj"
+        in_path.write_bytes(_build_synthetic_prproj())
+
+        # The fixture has 2 audio tracks → 2 AudioComponentChain objects.
+        root_in, _ = _parse_patched(in_path)
+        n_chains_before = len(root_in.findall("AudioComponentChain"))
+        assert n_chains_before == 2
+
+        # Many alternating segments to exercise the per-segment split loop.
+        audio_segments = [
+            _seg(0, 15, 0, SpeakerState.SPEAKER_A),
+            _seg(15, 30, 1, SpeakerState.SPEAKER_B),
+            _seg(30, 45, 0, SpeakerState.SPEAKER_A),
+            _seg(45, 60, 1, SpeakerState.SPEAKER_B),
+            _seg(60, 75, 0, SpeakerState.SPEAKER_A),
+            _seg(75, 100, 1, SpeakerState.SPEAKER_B),
+        ]
+
+        patch_prproj(
+            in_path, [], "TestSeq", out_path,
+            audio_segments=audio_segments,
+        )
+
+        root, obj_map = _parse_patched(out_path)
+        chains_after = root.findall("AudioComponentChain")
+
+        # The fix: chain count must NOT grow with the number of segments.
+        assert len(chains_after) == n_chains_before, (
+            f"AudioComponentChain count grew {n_chains_before} -> "
+            f"{len(chains_after)}: chains are being duplicated per segment"
+        )
+
+        # Every split AudioClipTrackItem must reference one of the originals.
+        chain_ids = {c.get("ObjectID") for c in chains_after}
+        audio_items = [el for el in root if el.tag == "AudioClipTrackItem"]
+        # The split really did produce more items than there are chains.
+        assert len(audio_items) > n_chains_before
+        for acti in audio_items:
+            comp = acti.find(".//Components")
+            assert comp is not None, "AudioClipTrackItem missing Components"
+            assert comp.get("ObjectRef") in chain_ids, (
+                "AudioClipTrackItem references a missing AudioComponentChain"
+            )
+
     def test_audio_mute_silence_keeps_both_enabled(self, tmp_path):
         """All silence → both tracks stay enabled (no audio holes)."""
         in_path = tmp_path / "test.prproj"
