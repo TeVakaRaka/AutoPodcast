@@ -71,6 +71,42 @@ class CollapsibleSection(ctk.CTkFrame):
             self.body.grid_remove()
 
 
+class SliderField(ctk.CTkFrame):
+    """A slider with a live value readout, for "creative" numeric params."""
+
+    def __init__(self, master, fld: Field):
+        super().__init__(master, fg_color="transparent")
+        self._fld = fld
+        self._decimals = 0 if fld.vstep >= 1 else 2
+        steps = max(1, int(round((fld.vmax - fld.vmin) / fld.vstep)))
+        self.slider = ctk.CTkSlider(
+            self, from_=fld.vmin, to=fld.vmax,
+            number_of_steps=steps, command=self._on_move,
+        )
+        start = fld.default if fld.default is not None else fld.vmin
+        self.slider.set(start)
+        self.slider.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        self.value_label = ctk.CTkLabel(self, width=70, anchor="e")
+        self.value_label.grid(row=0, column=1)
+        self.grid_columnconfigure(0, weight=1)
+        self._on_move(start)
+
+    def _quantized(self, raw: float) -> float:
+        f = self._fld
+        snapped = round((raw - f.vmin) / f.vstep) * f.vstep + f.vmin
+        return round(snapped, self._decimals)
+
+    def _on_move(self, raw: float) -> None:
+        value = self._quantized(raw)
+        text = f"{value:g}"
+        if self._fld.unit:
+            text += " " + self._fld.unit
+        self.value_label.configure(text=text)
+
+    def get(self) -> float:
+        return self._quantized(self.slider.get())
+
+
 def make_field_widget(master, fld: Field) -> tuple[ctk.CTkBaseClass, Callable[[], object]]:
     """Create the input widget for a Field and return (widget, getter)."""
     if fld.kind == "file":
@@ -86,6 +122,10 @@ def make_field_widget(master, fld: Field) -> tuple[ctk.CTkBaseClass, Callable[[]
         var = ctk.StringVar(value=str(fld.default))
         w = ctk.CTkOptionMenu(master, values=list(fld.choices), variable=var)
         return w, var.get
+
+    if fld.is_slider:
+        w = SliderField(master, fld)
+        return w, w.get
 
     # str / int / float -> a text entry
     w = ctk.CTkEntry(master, placeholder_text=fld.hint)

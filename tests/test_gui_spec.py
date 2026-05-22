@@ -149,6 +149,35 @@ class TestBuildArgvOutput:
 
 
 # ---------------------------------------------------------------------------
+# Slider fields
+# ---------------------------------------------------------------------------
+
+
+class TestSliderFields:
+    @pytest.mark.parametrize("spec", MODES, ids=[m.key for m in MODES])
+    def test_slider_ranges_are_valid(self, spec):
+        for f in spec.fields:
+            if not f.is_slider:
+                continue
+            assert f.vmin < f.vmax, f"{spec.cmd}:{f.arg} vmin must be < vmax"
+            assert f.vstep > 0, f"{spec.cmd}:{f.arg} vstep must be > 0"
+            if f.default is not None:
+                assert f.vmin <= f.default <= f.vmax, (
+                    f"{spec.cmd}:{f.arg} default {f.default} outside slider range"
+                )
+            steps = (f.vmax - f.vmin) / f.vstep
+            assert abs(steps - round(steps)) < 1e-6, (
+                f"{spec.cmd}:{f.arg} range is not a whole multiple of vstep"
+            )
+
+    def test_at_least_one_slider_per_creative_mode(self):
+        # sakha, monologue and 4cams expose tempo/percentage sliders
+        for key in ("sakha", "monologue", "4cams", "multicam"):
+            spec = mode_by_key(key)
+            assert any(f.is_slider for f in spec.fields), f"{key} has no sliders"
+
+
+# ---------------------------------------------------------------------------
 # Consistency: spec defaults must match the CLI @click.option defaults
 # ---------------------------------------------------------------------------
 

@@ -33,6 +33,21 @@ class Field:
     file_filter: str = ""          # for kind == "file": FILE_* category
     flag_pair: tuple | None = None  # for kind == "bool": (on_flag, off_flag)
     hint: str = ""                 # optional placeholder / help text
+    # When vmin/vmax are set on an int/float field, the GUI renders a slider
+    # instead of a text entry. vstep is the slider granularity; unit is shown
+    # next to the live value (e.g. "%", "с").
+    vmin: float | None = None
+    vmax: float | None = None
+    vstep: float = 1.0
+    unit: str = ""
+
+    @property
+    def is_slider(self) -> bool:
+        return (
+            self.kind in ("int", "float")
+            and self.vmin is not None
+            and self.vmax is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -123,6 +138,8 @@ _MULTICAM = ModeSpec(
         Field("--camera-wide", "Камера общего плана (angle)", "int", default=3, advanced=True),
         Field("--audio-track-host", "Аудиодорожка ведущего", "int", default=1, advanced=True),
         Field("--audio-track-guest", "Аудиодорожка гостя", "int", default=2, advanced=True),
+        Field("--dialogue-wide-interval", "Как часто общий план", "float", default=24.0,
+              advanced=True, vmin=5.0, vmax=90.0, vstep=5.0, unit="с"),
         Field("--mute-audio", "Глушить неактивный микрофон", "bool", default=True,
               advanced=True, flag_pair=("--mute-audio", "--no-mute-audio")),
         Field("--cross-cancel", "Подавлять утечку микрофонов", "bool", default=True,
@@ -152,6 +169,10 @@ _4CAMS = ModeSpec(
         Field("--audio-track-guest-1", "Аудиодорожка гостя 1", "int", default=2, advanced=True),
         Field("--audio-track-guest-2", "Аудиодорожка гостя 2", "int", default=3, advanced=True),
         Field("--audio-track-guest-3", "Аудиодорожка гостя 3", "int", default=4, advanced=True),
+        Field("--shot-hold", "Мин. длина кадра", "float", default=1.4,
+              advanced=True, vmin=0.5, vmax=5.0, vstep=0.1, unit="с"),
+        Field("--cooldown", "Пауза между склейками", "float", default=0.9,
+              advanced=True, vmin=0.2, vmax=3.0, vstep=0.1, unit="с"),
         Field("--motion-check", "Учитывать движение камер", "bool", default=False,
               advanced=True, flag_pair=("--motion-check", "--no-motion-check")),
         Field("--motion-hwaccel", "Ускорение анализа движения", "choice", default="hybrid",
@@ -184,10 +205,12 @@ _SAKHA = ModeSpec(
         Field("--audio-track-main-host", "Аудиодорожка главного ведущего", "int", default=1, advanced=True),
         Field("--audio-track-cohost", "Аудиодорожка со-ведущего", "int", default=2, advanced=True),
         Field("--audio-track-guest", "Аудиодорожка гостя", "int", default=3, advanced=True),
-        Field("--cut-intensity", "Интенсивность монтажа, 0-100%", "float", default=50.0, advanced=True),
+        Field("--cut-intensity", "Темп монтажа", "float", default=50.0,
+              advanced=True, vmin=0.0, vmax=100.0, vstep=5.0, unit="%"),
         Field("--reaction-sensitivity", "Чувствительность к репликам, 0-100%", "float",
               default=None, advanced=True, hint="пусто = 50"),
-        Field("--max-solo-hold", "Макс. удержание плана солиста, сек", "float", default=60.0, advanced=True),
+        Field("--max-solo-hold", "Макс. удержание плана солиста", "float", default=60.0,
+              advanced=True, vmin=10.0, vmax=180.0, vstep=10.0, unit="с"),
         Field("--motion-check", "Учитывать движение камер", "bool", default=False,
               advanced=True, flag_pair=("--motion-check", "--no-motion-check")),
         Field("--motion-speed", "Скорость анализа движения", "choice", default="balanced",
@@ -209,10 +232,14 @@ _MONOLOGUE = ModeSpec(
         Field("--camera-main", "Основная камера (angle)", "int", default=1, advanced=True),
         Field("--camera-accent", "Акцентная камера (angle)", "int", default=2, advanced=True),
         Field("--audio-track", "Аудиодорожка рассказчика", "int", default=1, advanced=True),
-        Field("--switch-interval", "Интервал переключения, сек", "float", default=30.0, advanced=True),
-        Field("--camera-main-share", "Доля основной камеры, %", "float", default=50.0, advanced=True),
-        Field("--min-pause", "Мин. пауза для переключения, сек", "float", default=0.35, advanced=True),
-        Field("--min-hold", "Мин. удержание камеры, сек", "float", default=12.0, advanced=True),
+        Field("--switch-interval", "Интервал переключения", "float", default=30.0,
+              advanced=True, vmin=5.0, vmax=120.0, vstep=5.0, unit="с"),
+        Field("--camera-main-share", "Доля основной камеры", "float", default=50.0,
+              advanced=True, vmin=0.0, vmax=100.0, vstep=5.0, unit="%"),
+        Field("--min-pause", "Мин. пауза для смены", "float", default=0.35,
+              advanced=True, vmin=0.1, vmax=2.0, vstep=0.05, unit="с"),
+        Field("--min-hold", "Мин. удержание камеры", "float", default=12.0,
+              advanced=True, vmin=2.0, vmax=60.0, vstep=2.0, unit="с"),
         Field("--motion-check", "Учитывать движение камер", "bool", default=True,
               advanced=True, flag_pair=("--motion-check", "--no-motion-check")),
         Field("--motion-hwaccel", "Ускорение анализа движения", "choice", default="hybrid",
