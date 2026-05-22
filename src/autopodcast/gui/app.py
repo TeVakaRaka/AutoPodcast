@@ -12,8 +12,8 @@ import customtkinter as ctk
 from autopodcast.gui.runner import ProcessRunner
 from autopodcast.gui.spec import MODES, build_argv
 from autopodcast.gui.widgets import (
-    CollapsibleSection,
     FileField,
+    Tooltip,
     make_field_widget,
 )
 
@@ -145,21 +145,27 @@ class AutoPodcastApp(ctk.CTk):
 
         row = 0
         for fld in spec.fields:
-            if not fld.advanced:
-                row = self._add_field_row(self.form, fld, row)
-
-        advanced = [f for f in spec.fields if f.advanced]
-        if advanced:
-            section = CollapsibleSection(self.form, "Дополнительно", expanded=False)
-            section.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-            srow = 0
-            for fld in advanced:
-                srow = self._add_field_row(section.body, fld, srow)
+            row = self._add_field_row(self.form, fld, row)
 
     def _add_field_row(self, parent, fld, row: int) -> int:
         text = fld.label + ("  *" if fld.required else "")
-        label = ctk.CTkLabel(parent, text=text, anchor="w")
-        label.grid(row=row, column=0, sticky="w", padx=(0, 12), pady=5)
+
+        if fld.hint and fld.kind != "file":
+            # label + ⓘ icon side-by-side in a transparent frame
+            lbl_frame = ctk.CTkFrame(parent, fg_color="transparent")
+            lbl_frame.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
+            ctk.CTkLabel(lbl_frame, text=text, anchor="w").pack(side="left")
+            icon = ctk.CTkLabel(
+                lbl_frame, text=" ⓘ",
+                text_color="#6a9ecf", font=ctk.CTkFont(size=12), anchor="w",
+            )
+            icon.pack(side="left")
+            Tooltip(icon, fld.hint)
+        else:
+            ctk.CTkLabel(parent, text=text, anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(0, 12), pady=5,
+            )
+
         widget, getter = make_field_widget(parent, fld)
         widget.grid(row=row, column=1, sticky="ew", pady=5)
         parent.grid_columnconfigure(1, weight=1)

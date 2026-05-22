@@ -2,12 +2,66 @@
 
 from __future__ import annotations
 
+import tkinter as tk
 from tkinter import filedialog
 from typing import Callable
 
 import customtkinter as ctk
 
 from autopodcast.gui.spec import FILE_AUDIO, FILE_PRPROJ, FILE_XML, Field
+
+
+class Tooltip:
+    """Floating tooltip that appears after a short hover delay."""
+
+    _DELAY_MS = 350
+
+    def __init__(self, widget: tk.BaseWidget, text: str) -> None:
+        self._widget = widget
+        self._text = text
+        self._win: tk.Toplevel | None = None
+        self._after_id: str | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._cancel, add="+")
+        widget.bind("<Button>", self._cancel, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after_id = self._widget.after(self._DELAY_MS, self._show)
+
+    def _cancel(self, _event=None) -> None:
+        if self._after_id is not None:
+            self._widget.after_cancel(self._after_id)
+            self._after_id = None
+        self._hide()
+
+    def _show(self) -> None:
+        if self._win is not None:
+            return
+        x = self._widget.winfo_rootx()
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+        self._win = tw = tk.Toplevel(self._widget)
+        tw.wm_overrideredirect(True)
+        tw.attributes("-topmost", True)
+        tw.configure(bg="#3a3a3a")
+        lbl = tk.Label(
+            tw,
+            text=self._text,
+            justify=tk.LEFT,
+            bg="#2b2b2b",
+            fg="#dddddd",
+            padx=10,
+            pady=6,
+            wraplength=320,
+            font=("Segoe UI", 9) if tk.TclVersion else ("Helvetica", 10),
+        )
+        lbl.pack(padx=1, pady=1)
+        tw.wm_geometry(f"+{x}+{y}")
+
+    def _hide(self) -> None:
+        if self._win is not None:
+            self._win.destroy()
+            self._win = None
 
 _FILETYPES = {
     FILE_PRPROJ: [("Premiere проект", "*.prproj"), ("Все файлы", "*.*")],
