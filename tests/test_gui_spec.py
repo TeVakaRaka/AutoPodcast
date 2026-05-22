@@ -82,9 +82,9 @@ class TestBuildArgvOverrides:
 
     def test_changed_float_is_emitted(self):
         spec = mode_by_key("multicam")
-        argv = build_argv(spec, _filled(spec, **{"--speech-threshold": -20.0}))
-        assert "--speech-threshold" in argv
-        assert argv[argv.index("--speech-threshold") + 1] == "-20.0"
+        argv = build_argv(spec, _filled(spec, **{"--vad-threshold": 0.5}))
+        assert "--vad-threshold" in argv
+        assert argv[argv.index("--vad-threshold") + 1] == "0.5"
 
     def test_bool_toggled_off_emits_off_flag(self):
         spec = mode_by_key("multicam")

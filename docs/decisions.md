@@ -60,6 +60,14 @@ runner so no one builds by hand. `build.spec` emits two exes —
 Replaced the text wizard with a window covering all four modes. Creative
 numeric parameters are sliders. See [gui.md](gui.md).
 
+### GUI exposes VAD strictness, not the RMS speech threshold
+The GUI dropped the `--speech-threshold` slider. That option is the
+RMS-backend dB threshold and has no effect when the Silero VAD backend is
+active — which it is by default (`silero-vad` is bundled, `--detector-backend
+auto` resolves to silero). The GUI now exposes `--vad-threshold` instead
+(0.3–0.9) — the real, working knob for the spectral VAD detector. The CLI
+still accepts `--speech-threshold` for the rms backend.
+
 ## Investigations that did NOT lead to code
 
 ### "Timeline lags / freezes" is not an autopodcast bug
