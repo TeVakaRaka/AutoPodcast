@@ -2838,3 +2838,10 @@ def patch_prproj_cmd(in_file, cuts, seq, out_file, fps):
 
     n = patch_prproj(Path(in_file), cuts_data, seq, Path(out_file), fps=fps)
     click.echo(f"Patched: {n} segments -> {out_file}")
+
+
+@cli.command("gui")
+def gui_cmd():
+    """Launch the graphical interface (native window)."""
+    from autopodcast.gui.main import main
+    main()

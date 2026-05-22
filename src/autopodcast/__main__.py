@@ -559,16 +559,23 @@ def _interactive_wizard():
 
 
 if getattr(sys, 'frozen', False) and len(sys.argv) <= 1:
-    # Double-click on exe → interactive wizard
+    # Double-click on the exe -> graphical interface.
     try:
-        _interactive_wizard()
-    except SystemExit:
-        pass
-    except Exception as e:
+        from autopodcast.gui.main import main as _gui_main
+        _gui_main()
+    except Exception:
+        # No display / broken customtkinter -> fall back to the text wizard.
         import traceback
         traceback.print_exc()
-        print(f"\n*** ОШИБКА: {e} ***")
-    _pause_before_exit("\nНажмите Enter для выхода...")
+        print("\nГрафический интерфейс не запустился, текстовый режим...\n")
+        try:
+            _interactive_wizard()
+        except SystemExit:
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            print(f"\n*** ОШИБКА: {e} ***")
+        _pause_before_exit("\nНажмите Enter для выхода...")
 else:
     try:
         cli()
