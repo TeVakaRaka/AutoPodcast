@@ -23,6 +23,19 @@ ctk.set_default_color_theme("blue")
 _LOG_FONT = ("Courier New", 12)
 _INVALID_BORDER = "#c0504d"  # red-ish border for an empty required field
 
+# (prefix, progress 0..1) — first match wins, values must be non-decreasing
+_PROGRESS_MARKERS = [
+    ("Audio sources:", 0.05),
+    ("Loading audio:", 0.10),
+    ("Duration:", 0.18),
+    ("Analyzing participant", 0.22),
+    ("Analyzing camera motion", 0.55),
+    ("Building SAKHA AYMAKH plan", 0.70),
+    ("Planning complete", 0.78),
+    ("Patching project", 0.88),
+    ("Done:", 0.98),
+]
+
 
 def open_folder(path: str | os.PathLike) -> None:
     """Open a folder in the OS file manager (best-effort, never raises)."""
@@ -63,6 +76,7 @@ class AutoPodcastApp(ctk.CTk):
         self._current_spec = MODES[0]
         self._busy = False
         self._last_out: str | None = None
+        self._progress_val: float = 0.0
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=3)
@@ -205,20 +219,31 @@ class AutoPodcastApp(ctk.CTk):
             return
 
         self._busy = True
+        self._progress_val = 0.0
         self.run_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
         self.open_btn.configure(state="disabled")
-        self.progress.configure(mode="indeterminate")
-        self.progress.start()
+        self.progress.set(0.01)
 
     def _on_cancel(self) -> None:
         self.runner.cancel()
         self._append("... запрошена отмена")
 
+    def _update_progress(self, line: str) -> None:
+        """Advance the progress bar when a known milestone appears in a log line."""
+        for prefix, value in _PROGRESS_MARKERS:
+            if prefix in line and value > self._progress_val:
+                self._progress_val = value
+                self.progress.set(value)
+                break
+
     def _poll_runner(self) -> None:
         while not self.runner.output.empty():
             try:
-                self._append(self.runner.output.get_nowait())
+                line = self.runner.output.get_nowait()
+                self._append(line)
+                if self._busy:
+                    self._update_progress(line)
             except Exception:  # noqa: BLE001
                 break
 
@@ -231,9 +256,7 @@ class AutoPodcastApp(ctk.CTk):
 
     def _finish(self, code: int) -> None:
         self._busy = False
-        self.progress.stop()
-        self.progress.configure(mode="determinate")
-        self.progress.set(1.0 if code == 0 else 0.0)
+        self.progress.set(1.0 if code == 0 else self._progress_val)
         self.cancel_btn.configure(state="disabled")
         self._append("-" * 64)
         if code == 0:

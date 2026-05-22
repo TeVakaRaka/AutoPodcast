@@ -1524,6 +1524,17 @@ def auto_switch_sakha_aimakh_cmd(
         )
     resolved_mic_paths = [path for path in mic_paths if path is not None]
 
+    unique_mic_paths = {str(p.resolve()) for p in resolved_mic_paths}
+    if len(unique_mic_paths) < len(resolved_mic_paths):
+        click.echo(
+            "Warning: несколько дорожек указывают на один и тот же аудиофайл — "
+            "раздельный анализ по спикерам невозможен. "
+            "Укажите отдельные файлы через --mic-main-host / --mic-cohost / --mic-guest; "
+            "заглушение дорожек отключено.",
+            err=True,
+        )
+        mute_audio = False
+
     analysis_config = ProjectConfig(
         audio_inputs=[
             AudioInput(path=resolved_mic_paths[0], speaker_label=label_main_host, camera_index=camera_main_host),
@@ -1777,6 +1788,7 @@ def auto_switch_sakha_aimakh_cmd(
     else:
         click.echo("  motion check: disabled")
 
+    click.echo("Building SAKHA AYMAKH plan...")
     plan = build_sakha_aimakh_plan(
         participant_specs,
         activities,
@@ -2042,6 +2054,7 @@ def auto_switch_sakha_aimakh_cmd(
                 }
             )
 
+    click.echo("Patching project...")
     patch_prproj(
         Path(in_file),
         cuts,
