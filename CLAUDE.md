@@ -13,6 +13,7 @@ Targets Premiere Pro (FCP 7 XML round-trip + `.prproj` patching + ExtendScript).
 ## Architecture
 - `src/autopodcast/core/` — pure functions over numpy arrays and dataclasses. No I/O.
   - Base: `analyzer`, `audio_loader`, `detector` (rms/silero), `segmenter`, `switcher`, `ducking`
+  - Bleed: `cross_cancel` — Wiener-Hopf mic-bleed cancellation, runs before the detector
   - Infra: `camera_motion`, `motion_cache`, `camera_scheduler`, `calibrator`, `roles`
   - Mode planners: `monologue_2cam` + `monologue_sources`, `auto_switch_4cams`, `sakha_aimakh`
   - Premiere I/O: `audio_sources` (resolves source files from `.prproj` / FCP 7 XML)
@@ -22,6 +23,9 @@ Targets Premiere Pro (FCP 7 XML round-trip + `.prproj` patching + ExtendScript).
 - `src/autopodcast/prproj_patcher.py` — parse/patch binary `.prproj` (gunzip + XML)
 - `src/autopodcast/import_xml.py` — read FCP 7 XML back into Timeline
 - `src/autopodcast/cli.py` + `__main__.py` — Click group with mode subcommands
+- `src/autopodcast/gui/` — customtkinter desktop GUI covering all four modes
+
+Full module map and data flow: [docs/architecture.md](docs/architecture.md).
 
 ## CLI modes
 ```bash
@@ -60,8 +64,27 @@ A standalone `autopodcast.exe` is produced via PyInstaller (`build.spec`). See
 [`WINDOWS_CHECK_BUILD.md`](WINDOWS_CHECK_BUILD.md) for the full flow
 (`DOWNLOAD_FFMPEG.bat` → `BUILD.bat` → `_build\dist\autopodcast\autopodcast.exe`).
 
+## GUI
+Double-clicking the exe (or `python3 -m autopodcast gui`) opens a customtkinter
+window covering all four modes. It builds an `autopodcast` CLI command from the
+form and runs it as a subprocess — it never reimplements pipeline logic.
+"Creative" numeric parameters (tempo, cut frequency, camera share, detector
+thresholds) are sliders. Form fields are declared in `gui/spec.py`; defaults
+there must match the `@click.option` defaults (a test enforces this).
+Details: [docs/gui.md](docs/gui.md).
+
 ## Releases
 Named feature snapshots are kept locally in `release/` (gitignored) with the convention
 `AutoPodcast-<TAG>-<YYYYMMDD>.zip`. The most recent is the canonical reference for
 "what's currently shipping" — do not rely on `git log` for that, the production code
-historically lived outside of git.
+historically lived outside of git. The Windows `.exe` is also built by GitHub
+Actions — see [docs/build-and-ci.md](docs/build-and-ci.md).
+
+## Documentation (read these first in a new session)
+- [docs/architecture.md](docs/architecture.md) — module map, data flow, design principles
+- [docs/decisions.md](docs/decisions.md) — what changed and why; investigations that did
+  NOT lead to code (read this to avoid re-debugging settled questions)
+- [docs/gui.md](docs/gui.md) — the GUI: structure, how to add fields/modes
+- [docs/build-and-ci.md](docs/build-and-ci.md) — PyInstaller build + GitHub Actions
+- [docs/algorithm.md](docs/algorithm.md) — base RMS/hysteresis pipeline
+- [docs/auto-switching-spec-4cams.md](docs/auto-switching-spec-4cams.md) — canonical 4-cam spec
