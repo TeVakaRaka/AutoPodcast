@@ -2,16 +2,49 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import customtkinter as ctk
 
 from autopodcast.gui.runner import ProcessRunner
 from autopodcast.gui.spec import MODES, build_argv
-from autopodcast.gui.widgets import CollapsibleSection, make_field_widget
+from autopodcast.gui.widgets import (
+    CollapsibleSection,
+    FileField,
+    make_field_widget,
+)
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 _LOG_FONT = ("Courier New", 12)
+_INVALID_BORDER = "#c0504d"  # red-ish border for an empty required field
+
+
+def open_folder(path: str | os.PathLike) -> None:
+    """Open a folder in the OS file manager (best-effort, never raises)."""
+    folder = str(path)
+    try:
+        if sys.platform == "win32":
+            os.startfile(folder)  # noqa: S606 - intended
+        elif sys.platform == "darwin":
+            subprocess.run(["open", folder], check=False)
+        else:
+            subprocess.run(["xdg-open", folder], check=False)
+    except Exception:  # noqa: BLE001 - opening a folder must never crash the GUI
+        pass
+
+
+def _entry_of(widget):
+    """Return the editable Entry of a field widget, or None."""
+    if isinstance(widget, FileField):
+        return widget.entry
+    if isinstance(widget, ctk.CTkEntry):
+        return widget
+    return None
 
 
 class AutoPodcastApp(ctk.CTk):
@@ -20,13 +53,16 @@ class AutoPodcastApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("AutoPodcast")
-        self.geometry("920x740")
-        self.minsize(760, 620)
+        self.geometry("920x760")
+        self.minsize(760, 640)
 
         self.runner = ProcessRunner()
         self._getters: dict[str, object] = {}
+        self._req_widgets: dict[str, object] = {}   # required arg -> widget
+        self._default_borders: dict[str, object] = {}
         self._current_spec = MODES[0]
         self._busy = False
+        self._last_out: str | None = None
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=3)
@@ -45,10 +81,10 @@ class AutoPodcastApp(ctk.CTk):
         self.form.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
         self.form.grid_columnconfigure(1, weight=1)
 
-        # --- run / cancel + progress ---
+        # --- run / cancel / open + progress ---
         controls = ctk.CTkFrame(self, fg_color="transparent")
         controls.grid(row=2, column=0, sticky="ew", padx=16, pady=8)
-        controls.grid_columnconfigure(2, weight=1)
+        controls.grid_columnconfigure(3, weight=1)
         self.run_btn = ctk.CTkButton(controls, text="Запустить", command=self._on_run)
         self.run_btn.grid(row=0, column=0, padx=(0, 8))
         self.cancel_btn = ctk.CTkButton(
@@ -56,8 +92,13 @@ class AutoPodcastApp(ctk.CTk):
             state="disabled", fg_color="#a0392e", hover_color="#7d2c24",
         )
         self.cancel_btn.grid(row=0, column=1, padx=(0, 8))
+        self.open_btn = ctk.CTkButton(
+            controls, text="Открыть папку результата",
+            command=self._open_result_folder, state="disabled",
+        )
+        self.open_btn.grid(row=0, column=2, padx=(0, 8))
         self.progress = ctk.CTkProgressBar(controls)
-        self.progress.grid(row=0, column=2, sticky="ew")
+        self.progress.grid(row=0, column=3, sticky="ew")
         self.progress.set(0)
 
         # --- log ---
@@ -73,8 +114,7 @@ class AutoPodcastApp(ctk.CTk):
 
     def _on_mode_change(self, title: str) -> None:
         if self._busy:
-            # don't switch mid-run; restore selector
-            self.selector.set(self._current_spec.title)
+            self.selector.set(self._current_spec.title)  # no switching mid-run
             return
         for mode in MODES:
             if mode.title == title:
@@ -86,6 +126,8 @@ class AutoPodcastApp(ctk.CTk):
         for child in self.form.winfo_children():
             child.destroy()
         self._getters = {}
+        self._req_widgets = {}
+        self._default_borders = {}
 
         row = 0
         for fld in spec.fields:
@@ -108,7 +150,34 @@ class AutoPodcastApp(ctk.CTk):
         widget.grid(row=row, column=1, sticky="ew", pady=5)
         parent.grid_columnconfigure(1, weight=1)
         self._getters[fld.arg] = getter
+        if fld.required:
+            self._req_widgets[fld.arg] = widget
+            entry = _entry_of(widget)
+            if entry is not None:
+                self._default_borders[fld.arg] = entry.cget("border_color")
         return row + 1
+
+    # ------------------------------------------------------------ validation
+
+    def _validate(self) -> None:
+        """Highlight empty required fields and enable Run only when all filled."""
+        if self._busy:
+            return
+        all_filled = True
+        for arg, widget in self._req_widgets.items():
+            getter = self._getters.get(arg)
+            filled = bool(str(getter()).strip()) if getter else False
+            if not filled:
+                all_filled = False
+            entry = _entry_of(widget)
+            if entry is not None:
+                if filled:
+                    default = self._default_borders.get(arg)
+                    if default is not None:
+                        entry.configure(border_color=default)
+                else:
+                    entry.configure(border_color=_INVALID_BORDER)
+        self.run_btn.configure(state="normal" if all_filled else "disabled")
 
     # ------------------------------------------------------------------- run
 
@@ -122,6 +191,10 @@ class AutoPodcastApp(ctk.CTk):
             self._append(f"!!! {exc}")
             return
 
+        self._last_out = None
+        if "--out" in argv:
+            self._last_out = argv[argv.index("--out") + 1]
+
         self._clear_log()
         self._append("Команда: autopodcast " + " ".join(argv))
         self._append("-" * 64)
@@ -134,6 +207,7 @@ class AutoPodcastApp(ctk.CTk):
         self._busy = True
         self.run_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
+        self.open_btn.configure(state="disabled")
         self.progress.configure(mode="indeterminate")
         self.progress.start()
 
@@ -150,6 +224,8 @@ class AutoPodcastApp(ctk.CTk):
 
         if self._busy and not self.runner.running and self.runner.returncode is not None:
             self._finish(self.runner.returncode)
+        else:
+            self._validate()
 
         self.after(100, self._poll_runner)
 
@@ -158,13 +234,19 @@ class AutoPodcastApp(ctk.CTk):
         self.progress.stop()
         self.progress.configure(mode="determinate")
         self.progress.set(1.0 if code == 0 else 0.0)
-        self.run_btn.configure(state="normal")
         self.cancel_btn.configure(state="disabled")
         self._append("-" * 64)
         if code == 0:
             self._append("ГОТОВО. Откройте результат в Premiere Pro (File > Open Project).")
+            if self._last_out and Path(self._last_out).parent.exists():
+                self.open_btn.configure(state="normal")
         else:
             self._append(f"ЗАВЕРШЕНО С ОШИБКОЙ (код {code}). Проверьте лог выше.")
+        self._validate()  # restores Run button state
+
+    def _open_result_folder(self) -> None:
+        if self._last_out:
+            open_folder(Path(self._last_out).parent)
 
     # ------------------------------------------------------------------- log
 
