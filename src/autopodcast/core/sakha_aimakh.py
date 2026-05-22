@@ -92,6 +92,9 @@ class SakhaAymakhConfig:
     # channel may sit and still count as a real (overlapping) speaker.
     calibrated_switch_margin_db: float = 2.5
     calibrated_overlap_floor_db: float = 4.0
+    # Minimum time the open channel is held before a switch is allowed, so
+    # sub-second loudness wobble (mutual bleed) cannot chatter the edit.
+    calibrated_min_hold_s: float = 0.8
 
     def validate(self) -> None:
         for name, value in [
@@ -123,6 +126,7 @@ class SakhaAymakhConfig:
             ("source_owner_tie_margin_db", self.source_owner_tie_margin_db),
             ("calibrated_switch_margin_db", self.calibrated_switch_margin_db),
             ("calibrated_overlap_floor_db", self.calibrated_overlap_floor_db),
+            ("calibrated_min_hold_s", self.calibrated_min_hold_s),
         ]:
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
@@ -1060,18 +1064,24 @@ def _pick_calibrated_owner(
     normalized: dict[str, float],
     current_owner: str | None,
     config: SakhaAymakhConfig,
+    owner_locked: bool = False,
 ) -> tuple[list[str], str]:
     """Resolve simultaneous raw detections by normalised loudness + hysteresis."""
-    best = max(raw_candidates, key=lambda key: normalized[key])
-    owner = best
-    # Hysteresis: the already-open channel keeps priority until a rival beats
-    # it by a confident margin — this stops the edit chattering on every small
-    # loudness wobble or breath.
-    if (
-        current_owner in normalized
-        and normalized[best] - normalized[current_owner] < config.calibrated_switch_margin_db
-    ):
+    if owner_locked and current_owner in normalized:
+        # Time hysteresis: the open channel has not been held long enough yet,
+        # so it keeps the frame regardless of small loudness swings.
         owner = current_owner
+    else:
+        best = max(raw_candidates, key=lambda key: normalized[key])
+        owner = best
+        # Level hysteresis: the already-open channel keeps priority until a
+        # rival beats it by a confident margin — this stops the edit chattering
+        # on every small loudness wobble or breath.
+        if (
+            current_owner in normalized
+            and normalized[best] - normalized[current_owner] < config.calibrated_switch_margin_db
+        ):
+            owner = current_owner
     # Genuine overlap: any other channel still close to its own reference is a
     # person actually talking, not bleed (bleed sits far below 0).
     overlap = [
@@ -1105,6 +1115,8 @@ def _build_calibrated_frame_states(
     all_keys = [part.key for part in participants]
     result: list[SakhaFrameState] = []
     current_owner: str | None = None
+    owner_since_idx = 0
+    min_hold_frames = max(1, round(config.calibrated_min_hold_s / hop_s))
 
     for idx in range(frame_count):
         raw_candidates = [
@@ -1122,17 +1134,21 @@ def _build_calibrated_frame_states(
                 key: _calibrated_normalized_db(key, activities, idx, profiles)
                 for key in raw_candidates
             }
+            owner_locked = (
+                current_owner in normalized
+                and (idx - owner_since_idx) < min_hold_frames
+            )
             active_keys, reason = _pick_calibrated_owner(
-                raw_candidates, normalized, current_owner, config,
+                raw_candidates, normalized, current_owner, config, owner_locked,
             )
 
         frame = _make_frame_state(participants, activities, idx, active_keys, reason)
         result.append(frame)
 
-        if len(frame.active_keys) == 1:
-            current_owner = frame.active_keys[0]
-        elif len(frame.active_keys) > 1 and frame.focus_key is not None:
-            current_owner = frame.focus_key
+        new_owner = frame.focus_key
+        if new_owner is not None and new_owner != current_owner:
+            current_owner = new_owner
+            owner_since_idx = idx
 
     return result
 

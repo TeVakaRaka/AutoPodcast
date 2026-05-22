@@ -1908,6 +1908,7 @@ def auto_switch_sakha_aimakh_cmd(
             "audio_clean_mode": sakha_config.audio_clean_mode,
             "calibrated_switch_margin_db": sakha_config.calibrated_switch_margin_db,
             "calibrated_overlap_floor_db": sakha_config.calibrated_overlap_floor_db,
+            "calibrated_min_hold_s": sakha_config.calibrated_min_hold_s,
             "debleed_enabled": sakha_config.debleed_enabled,
             "debleed_overlap_margin_db": sakha_config.debleed_overlap_margin_db,
             "debleed_min_leader_score_db": sakha_config.debleed_min_leader_score_db,
