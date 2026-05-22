@@ -85,6 +85,13 @@ class SakhaAymakhConfig:
     source_owner_residual_voice_snr_db: float = 16.0
     source_owner_min_corr: float = 0.42
     source_owner_tie_margin_db: float = 3.0
+    # "calibrated" mode: loudness comparison after normalising every channel
+    # to its own reference level. switch_margin is the hysteresis band — an
+    # already-open channel keeps priority until a rival is louder by at least
+    # this many dB. overlap_floor is how far below its own reference a second
+    # channel may sit and still count as a real (overlapping) speaker.
+    calibrated_switch_margin_db: float = 2.5
+    calibrated_overlap_floor_db: float = 4.0
 
     def validate(self) -> None:
         for name, value in [
@@ -114,11 +121,15 @@ class SakhaAymakhConfig:
             ("strict_switch_margin_db", self.strict_switch_margin_db),
             ("source_owner_residual_voice_snr_db", self.source_owner_residual_voice_snr_db),
             ("source_owner_tie_margin_db", self.source_owner_tie_margin_db),
+            ("calibrated_switch_margin_db", self.calibrated_switch_margin_db),
+            ("calibrated_overlap_floor_db", self.calibrated_overlap_floor_db),
         ]:
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
-        if self.audio_clean_mode not in {"strict", "balanced", "legacy"}:
-            raise ValueError("audio_clean_mode must be 'strict', 'balanced', or 'legacy'")
+        if self.audio_clean_mode not in {"strict", "balanced", "legacy", "calibrated"}:
+            raise ValueError(
+                "audio_clean_mode must be 'strict', 'balanced', 'legacy', or 'calibrated'"
+            )
         if self.dominance_delta_db < 0:
             raise ValueError(f"dominance_delta_db must be >= 0, got {self.dominance_delta_db}")
         if self.forced_min_drop_db < 0:
@@ -421,6 +432,10 @@ def build_frame_states(
 
     result: list[SakhaFrameState] = []
     profiles = debleed_profiles or _build_debleed_profiles(participants, activities, config)
+    if config.audio_clean_mode == "calibrated":
+        return _build_calibrated_frame_states(
+            participants, activities, config, hop_s, profiles,
+        )
     if config.audio_clean_mode != "legacy":
         if waveform_gate is not None and waveform_gate.available:
             return _build_source_owner_frame_states(
@@ -1017,6 +1032,107 @@ def _build_strict_frame_states(
             if focus is not None and focus != current_focus:
                 current_focus = focus
                 current_focus_start_idx = idx
+
+    return result
+
+
+def _calibrated_normalized_db(
+    key: str,
+    activities: dict[str, SpeakerActivity],
+    idx: int,
+    profiles: dict[str, SakhaDebleedProfile],
+) -> float:
+    """Channel level relative to that speaker's own reference level.
+
+    Subtracting each channel's own 90th-percentile speaking level cancels any
+    fixed gain offset: a permanently hot microphone gets a high reference, so
+    its bleed still lands well below 0 and cannot win on raw loudness.
+    """
+    envelope_db = activities[key].frames[idx].envelope_db
+    profile = profiles.get(key)
+    if profile is None:
+        return envelope_db
+    return envelope_db - profile.reference_db
+
+
+def _pick_calibrated_owner(
+    raw_candidates: list[str],
+    normalized: dict[str, float],
+    current_owner: str | None,
+    config: SakhaAymakhConfig,
+) -> tuple[list[str], str]:
+    """Resolve simultaneous raw detections by normalised loudness + hysteresis."""
+    best = max(raw_candidates, key=lambda key: normalized[key])
+    owner = best
+    # Hysteresis: the already-open channel keeps priority until a rival beats
+    # it by a confident margin — this stops the edit chattering on every small
+    # loudness wobble or breath.
+    if (
+        current_owner in normalized
+        and normalized[best] - normalized[current_owner] < config.calibrated_switch_margin_db
+    ):
+        owner = current_owner
+    # Genuine overlap: any other channel still close to its own reference is a
+    # person actually talking, not bleed (bleed sits far below 0).
+    overlap = [
+        key
+        for key in raw_candidates
+        if key != owner and normalized[key] >= -config.calibrated_overlap_floor_db
+    ]
+    if overlap:
+        return sorted({owner, *overlap}), "calibrated_overlap"
+    return [owner], "calibrated_bleed_suppressed"
+
+
+def _build_calibrated_frame_states(
+    participants: list[SakhaParticipantSpec],
+    activities: dict[str, SpeakerActivity],
+    config: SakhaAymakhConfig,
+    hop_s: float,
+    profiles: dict[str, SakhaDebleedProfile],
+) -> list[SakhaFrameState]:
+    """Frame states for the "calibrated" loudness mode.
+
+    Stage 1 — per-channel speech detection (the VAD result already carried in
+              ``activities``).
+    Stage 2 — when several channels fire at once, the owner is the channel
+              loudest relative to its own reference, with hysteresis so the
+              open channel keeps priority until a rival is clearly louder.
+    Stage 3 — seam clean-up runs later in :func:`build_audio_plan` and the
+              camera-segment post-processing, shared with every mode.
+    """
+    frame_count = min(len(activities[part.key].frames) for part in participants)
+    all_keys = [part.key for part in participants]
+    result: list[SakhaFrameState] = []
+    current_owner: str | None = None
+
+    for idx in range(frame_count):
+        raw_candidates = [
+            key for key in all_keys if activities[key].frames[idx].is_active
+        ]
+        if not raw_candidates:
+            result.append(_make_frame_state(participants, activities, idx, [], None))
+            continue
+
+        if len(raw_candidates) == 1:
+            active_keys: list[str] = list(raw_candidates)
+            reason = "calibrated_single_raw"
+        else:
+            normalized = {
+                key: _calibrated_normalized_db(key, activities, idx, profiles)
+                for key in raw_candidates
+            }
+            active_keys, reason = _pick_calibrated_owner(
+                raw_candidates, normalized, current_owner, config,
+            )
+
+        frame = _make_frame_state(participants, activities, idx, active_keys, reason)
+        result.append(frame)
+
+        if len(frame.active_keys) == 1:
+            current_owner = frame.active_keys[0]
+        elif len(frame.active_keys) > 1 and frame.focus_key is not None:
+            current_owner = frame.focus_key
 
     return result
 

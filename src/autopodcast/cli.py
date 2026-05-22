@@ -1398,7 +1398,7 @@ def auto_switch_4cams_cmd(
 @click.option("--hold-ms", default=350.0, type=float, help="Hold time after speech in ms")
 @click.option("--audio-pre-roll", default=0.24, type=float, help="Open audio this many seconds before detected onset")
 @click.option("--audio-post-roll", default=0.12, type=float, help="Keep audio open this many seconds after detected end")
-@click.option("--audio-clean-mode", default="strict", type=click.Choice(["strict", "balanced", "legacy"]), show_default=True, help="SAKHA audio leak cleanup mode")
+@click.option("--audio-clean-mode", default="strict", type=click.Choice(["strict", "balanced", "legacy", "calibrated"]), show_default=True, help="SAKHA audio leak cleanup mode")
 @click.option("--motion-check/--no-motion-check", default=False, help="Avoid switching to moving cameras in SAKHA AYMAKH mode")
 @click.option("--motion-hwaccel", default="hybrid", type=click.Choice(["cpu", "hybrid"]), help="Motion analysis acceleration policy")
 @click.option("--motion-speed", default="balanced", type=click.Choice(["balanced", "turbo"]), help="Motion analysis speed policy")
@@ -1906,6 +1906,8 @@ def auto_switch_sakha_aimakh_cmd(
             "audio_min_closed_s": sakha_config.audio_min_closed_s,
             "audio_silence_policy": sakha_config.audio_silence_policy,
             "audio_clean_mode": sakha_config.audio_clean_mode,
+            "calibrated_switch_margin_db": sakha_config.calibrated_switch_margin_db,
+            "calibrated_overlap_floor_db": sakha_config.calibrated_overlap_floor_db,
             "debleed_enabled": sakha_config.debleed_enabled,
             "debleed_overlap_margin_db": sakha_config.debleed_overlap_margin_db,
             "debleed_min_leader_score_db": sakha_config.debleed_min_leader_score_db,

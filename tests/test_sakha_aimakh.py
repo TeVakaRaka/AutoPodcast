@@ -772,3 +772,58 @@ class TestSakhaAymakhCli:
         assert configs[0]["reaction_sensitivity"] == configs[1]["reaction_sensitivity"] == 25.0
         assert configs[0]["dominance_delta_db"] == configs[1]["dominance_delta_db"]
         assert configs[0]["debleed_overlap_margin_db"] == configs[1]["debleed_overlap_margin_db"]
+
+
+def test_calibrated_mode_picks_real_speaker_over_overgained_bleed():
+    """calibrated mode normalises every channel to its own reference level, so
+    an over-gained microphone whose bleed is louder in raw dB still loses to
+    the real (quieter) speaker — and the previous owner's hysteresis is
+    correctly overridden once the rival is decisively louder."""
+    cfg = _config(audio_clean_mode="calibrated")
+    plan = _plan(
+        {
+            "main_host": _level_activity("main_host", [], 6.0, default_db=-70.0),
+            # Hot cohost mic: own speech at -8 dB, bleed at -22 dB — still
+            # louder in raw dB than the guest's -30 dB direct voice.
+            "cohost": _level_activity(
+                "cohost",
+                [(0.0, 3.0, -8.0), (3.0, 6.0, -22.0)],
+                6.0,
+                default_db=-50.0,
+            ),
+            "guest": _level_activity(
+                "guest",
+                [(3.0, 6.0, -30.0)],
+                6.0,
+                default_db=-70.0,
+            ),
+        },
+        6.0,
+        cfg,
+    )
+
+    # [0,3]: only the cohost talks -> it becomes the held owner.
+    assert plan.frame_states[10].active_keys == ("cohost",)
+    # [3,6]: the guest talks, the cohost mic only catches bleed. Although the
+    # cohost is louder in raw dB, normalised loudness hands the frame to the
+    # guest and overrides the held cohost.
+    assert plan.frame_states[40].active_keys == ("guest",)
+    assert plan.frame_states[40].state == SakhaAymakhState.GUEST_ONLY
+
+
+def test_calibrated_mode_opens_both_mics_on_genuine_overlap():
+    """When two channels are both close to their own reference level they are
+    both really talking, so calibrated mode opens both."""
+    cfg = _config(audio_clean_mode="calibrated")
+    plan = _plan(
+        {
+            "main_host": _level_activity("main_host", [], 4.0, default_db=-70.0),
+            "cohost": _level_activity("cohost", [(0.0, 4.0, -20.0)], 4.0, default_db=-60.0),
+            "guest": _level_activity("guest", [(0.0, 4.0, -25.0)], 4.0, default_db=-70.0),
+        },
+        4.0,
+        cfg,
+    )
+
+    assert set(plan.frame_states[20].active_keys) == {"cohost", "guest"}
+    assert plan.frame_states[20].state == SakhaAymakhState.COHOST_GUEST
