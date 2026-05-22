@@ -144,8 +144,10 @@ _MULTICAM = ModeSpec(
               advanced=True, flag_pair=("--mute-audio", "--no-mute-audio")),
         Field("--cross-cancel", "Подавлять утечку микрофонов", "bool", default=True,
               advanced=True, flag_pair=("--cross-cancel", "--no-cross-cancel")),
-        Field("--speech-threshold", "Порог речи, dB", "float", default=-24.0, advanced=True),
-        Field("--input-gain", "Входное усиление, dB", "float", default=0.0, advanced=True),
+        Field("--speech-threshold", "Порог речи", "float", default=-24.0,
+              advanced=True, vmin=-45.0, vmax=-6.0, vstep=1.0, unit="dB"),
+        Field("--input-gain", "Входное усиление", "float", default=0.0,
+              advanced=True, vmin=-12.0, vmax=12.0, vstep=1.0, unit="dB"),
     ],
 )
 
@@ -177,8 +179,10 @@ _4CAMS = ModeSpec(
               advanced=True, flag_pair=("--motion-check", "--no-motion-check")),
         Field("--motion-hwaccel", "Ускорение анализа движения", "choice", default="hybrid",
               advanced=True, choices=("cpu", "hybrid")),
-        Field("--speech-threshold", "Порог речи, dB", "float", default=-27.0, advanced=True),
-        Field("--input-gain", "Входное усиление, dB", "float", default=0.0, advanced=True),
+        Field("--speech-threshold", "Порог речи", "float", default=-27.0,
+              advanced=True, vmin=-45.0, vmax=-6.0, vstep=1.0, unit="dB"),
+        Field("--input-gain", "Входное усиление", "float", default=0.0,
+              advanced=True, vmin=-12.0, vmax=12.0, vstep=1.0, unit="dB"),
     ],
 )
 
@@ -215,8 +219,10 @@ _SAKHA = ModeSpec(
               advanced=True, flag_pair=("--motion-check", "--no-motion-check")),
         Field("--motion-speed", "Скорость анализа движения", "choice", default="balanced",
               advanced=True, choices=("balanced", "turbo")),
-        Field("--speech-threshold", "Порог речи, dB", "float", default=-27.0, advanced=True),
-        Field("--input-gain", "Входное усиление, dB", "float", default=0.0, advanced=True),
+        Field("--speech-threshold", "Порог речи", "float", default=-27.0,
+              advanced=True, vmin=-45.0, vmax=-6.0, vstep=1.0, unit="dB"),
+        Field("--input-gain", "Входное усиление", "float", default=0.0,
+              advanced=True, vmin=-12.0, vmax=12.0, vstep=1.0, unit="dB"),
     ],
 )
 
@@ -244,8 +250,10 @@ _MONOLOGUE = ModeSpec(
               advanced=True, flag_pair=("--motion-check", "--no-motion-check")),
         Field("--motion-hwaccel", "Ускорение анализа движения", "choice", default="hybrid",
               advanced=True, choices=("cpu", "hybrid")),
-        Field("--speech-threshold", "Порог речи, dB", "float", default=-24.0, advanced=True),
-        Field("--input-gain", "Входное усиление, dB", "float", default=0.0, advanced=True),
+        Field("--speech-threshold", "Порог речи", "float", default=-24.0,
+              advanced=True, vmin=-45.0, vmax=-6.0, vstep=1.0, unit="dB"),
+        Field("--input-gain", "Входное усиление", "float", default=0.0,
+              advanced=True, vmin=-12.0, vmax=12.0, vstep=1.0, unit="dB"),
     ],
 )
 
