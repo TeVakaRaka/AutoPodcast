@@ -1398,7 +1398,7 @@ def auto_switch_4cams_cmd(
 @click.option("--hold-ms", default=350.0, type=float, help="Hold time after speech in ms")
 @click.option("--audio-pre-roll", default=0.24, type=float, help="Open audio this many seconds before detected onset")
 @click.option("--audio-post-roll", default=0.12, type=float, help="Keep audio open this many seconds after detected end")
-@click.option("--audio-clean-mode", default="calibrated", type=click.Choice(["calibrated", "strict", "balanced", "legacy"]), show_default=True, help="SAKHA audio leak cleanup mode")
+@click.option("--audio-clean-mode", default="studio", type=click.Choice(["studio", "calibrated", "strict", "balanced", "legacy"]), show_default=True, help="SAKHA audio leak cleanup mode")
 @click.option("--motion-check/--no-motion-check", default=False, help="Avoid switching to moving cameras in SAKHA AYMAKH mode")
 @click.option("--motion-hwaccel", default="hybrid", type=click.Choice(["cpu", "hybrid"]), help="Motion analysis acceleration policy")
 @click.option("--motion-speed", default="balanced", type=click.Choice(["balanced", "turbo"]), help="Motion analysis speed policy")

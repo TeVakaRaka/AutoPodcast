@@ -827,3 +827,57 @@ def test_calibrated_mode_opens_both_mics_on_genuine_overlap():
 
     assert set(plan.frame_states[20].active_keys) == {"cohost", "guest"}
     assert plan.frame_states[20].state == SakhaAymakhState.COHOST_GUEST
+
+
+def test_studio_mode_picks_real_speaker_over_overgained_bleed():
+    """studio mode keeps calibrated's normalized attribution, so it makes the same call as
+    calibrated on the over-gained-bleed scenario: the guest's quiet direct voice wins over the
+    cohost's louder bleed."""
+    cfg = _config(audio_clean_mode="studio")
+    plan = _plan(
+        {
+            "main_host": _level_activity("main_host", [], 6.0, default_db=-70.0),
+            "cohost": _level_activity(
+                "cohost", [(0.0, 3.0, -8.0), (3.0, 6.0, -22.0)], 6.0, default_db=-50.0
+            ),
+            "guest": _level_activity("guest", [(3.0, 6.0, -30.0)], 6.0, default_db=-70.0),
+        },
+        6.0,
+        cfg,
+    )
+    assert plan.frame_states[10].active_keys == ("cohost",)
+    assert plan.frame_states[45].active_keys == ("guest",)
+    assert plan.frame_states[45].state == SakhaAymakhState.GUEST_ONLY
+
+
+def test_studio_mode_opens_both_mics_on_genuine_overlap():
+    """Two channels both near their own reference are both really talking -> both open."""
+    cfg = _config(audio_clean_mode="studio")
+    plan = _plan(
+        {
+            "main_host": _level_activity("main_host", [], 4.0, default_db=-70.0),
+            "cohost": _level_activity("cohost", [(0.0, 4.0, -20.0)], 4.0, default_db=-60.0),
+            "guest": _level_activity("guest", [(0.0, 4.0, -25.0)], 4.0, default_db=-70.0),
+        },
+        4.0,
+        cfg,
+    )
+    assert set(plan.frame_states[20].active_keys) == {"cohost", "guest"}
+
+
+def test_studio_mode_has_no_subhalfsecond_open_intervals():
+    """studio mode de-flickers the open/close labels: no audio open interval is shorter than
+    the 0.5 s minimum, even on rapidly alternating turns."""
+    cfg = _config(audio_clean_mode="studio")
+    plan = _plan(
+        {
+            "main_host": _level_activity("main_host", [(0.0, 2.0, -20.0)], 6.0, default_db=-65.0),
+            "cohost": _level_activity("cohost", [(2.0, 4.0, -20.0)], 6.0, default_db=-65.0),
+            "guest": _level_activity("guest", [(4.0, 6.0, -20.0)], 6.0, default_db=-65.0),
+        },
+        6.0,
+        cfg,
+    )
+    for track, intervals in plan.audio_open_intervals_s.items():
+        for start_s, end_s in intervals:
+            assert (end_s - start_s) >= 0.5 - 1e-6, f"short open {end_s - start_s:.3f}s on track {track}"

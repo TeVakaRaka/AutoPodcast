@@ -6,6 +6,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from math import ceil
+from typing import Callable
 
 import numpy as np
 
@@ -14,6 +15,11 @@ from autopodcast.models.domain import SpeakerActivity
 
 EPS = 1e-9
 SAKHA_MOTION_ENTRY_LOOKAHEAD_S = 1.5
+
+# "studio" mode = calibrated attribution + acausal de-flicker of the open/owner labels.
+STUDIO_WINDOW_S = 0.45      # half-window for the rolling mode / majority smoothing
+STUDIO_MIN_OPEN_S = 0.50    # drop open runs shorter than this (de-flicker)
+STUDIO_MIN_GAP_S = 0.30     # fill closed gaps shorter than this
 
 
 class SakhaAymakhState(str, Enum):
@@ -130,9 +136,9 @@ class SakhaAymakhConfig:
         ]:
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
-        if self.audio_clean_mode not in {"strict", "balanced", "legacy", "calibrated"}:
+        if self.audio_clean_mode not in {"strict", "balanced", "legacy", "calibrated", "studio"}:
             raise ValueError(
-                "audio_clean_mode must be 'strict', 'balanced', 'legacy', or 'calibrated'"
+                "audio_clean_mode must be 'strict', 'balanced', 'legacy', 'calibrated', or 'studio'"
             )
         if self.dominance_delta_db < 0:
             raise ValueError(f"dominance_delta_db must be >= 0, got {self.dominance_delta_db}")
@@ -327,6 +333,7 @@ def build_sakha_aimakh_plan(
     motion_plans: dict[int, CameraMotionPlan] | None = None,
     audio_arrays_by_key: dict[str, np.ndarray] | None = None,
     audio_sample_rate: int | None = None,
+    frame_state_builder: "Callable[..., list[SakhaFrameState]] | None" = None,
 ) -> SakhaAymakhPlan:
     config.validate()
     _validate_participants(participants)
@@ -336,7 +343,8 @@ def build_sakha_aimakh_plan(
         audio_sample_rate,
         config,
     )
-    frame_states = build_frame_states(
+    builder = frame_state_builder or build_frame_states
+    frame_states = builder(
         participants,
         activities,
         config,
@@ -436,6 +444,10 @@ def build_frame_states(
 
     result: list[SakhaFrameState] = []
     profiles = debleed_profiles or _build_debleed_profiles(participants, activities, config)
+    if config.audio_clean_mode == "studio":
+        return _build_studio_frame_states(
+            participants, activities, config, hop_s, profiles,
+        )
     if config.audio_clean_mode == "calibrated":
         return _build_calibrated_frame_states(
             participants, activities, config, hop_s, profiles,
@@ -1150,6 +1162,131 @@ def _build_calibrated_frame_states(
             current_owner = new_owner
             owner_since_idx = idx
 
+    return result
+
+
+def _studio_rolling_mode(codes: np.ndarray, w: int) -> np.ndarray:
+    """For each i, the most-common code in [i-w, i+w] among the speaking codes (-1 = silence).
+    Returns -1 where the window holds no speaking frame."""
+    n = len(codes)
+    out = np.full(n, -1, dtype=np.int64)
+    if n == 0:
+        return out
+    k = int(codes.max()) + 1 if codes.max() >= 0 else 0
+    cnt = [0] * max(k, 1)
+    lo = hi = 0
+    for i in range(n):
+        nlo, nhi = max(0, i - w), min(n, i + w + 1)
+        while hi < nhi:
+            c = codes[hi]
+            if c >= 0:
+                cnt[c] += 1
+            hi += 1
+        while lo < nlo:
+            c = codes[lo]
+            if c >= 0:
+                cnt[c] -= 1
+            lo += 1
+        best = -1
+        best_n = 0
+        for c in range(len(cnt)):
+            if cnt[c] > best_n:
+                best_n = cnt[c]
+                best = c
+        out[i] = best
+    return out
+
+
+def _studio_rolling_majority(mask: np.ndarray, w: int) -> np.ndarray:
+    """Boolean: True where ``mask`` is True for the strict majority of [i-w, i+w]."""
+    n = len(mask)
+    out = np.zeros(n, dtype=bool)
+    if n == 0:
+        return out
+    c = np.concatenate(([0], np.cumsum(mask.astype(np.int64))))
+    for i in range(n):
+        lo, hi = max(0, i - w), min(n, i + w + 1)
+        out[i] = (c[hi] - c[lo]) * 2 > (hi - lo)
+    return out
+
+
+def _studio_min_run(mask: np.ndarray, min_on: int, min_off: int) -> np.ndarray:
+    """Drop True runs shorter than ``min_on``, then fill interior False gaps shorter than
+    ``min_off`` (leading/trailing gaps are left closed)."""
+    out = mask.copy()
+    n = len(out)
+
+    def _runs(val):
+        i = 0
+        while i < n:
+            if out[i] == val:
+                j = i
+                while j < n and out[j] == val:
+                    j += 1
+                yield i, j
+                i = j
+            else:
+                i += 1
+
+    for a, b in list(_runs(True)):
+        if b - a < min_on:
+            out[a:b] = False
+    for a, b in list(_runs(False)):
+        if a > 0 and b < n and b - a < min_off:
+            out[a:b] = True
+    return out
+
+
+def _build_studio_frame_states(
+    participants: list[SakhaParticipantSpec],
+    activities: dict[str, SpeakerActivity],
+    config: SakhaAymakhConfig,
+    hop_s: float,
+    profiles: dict[str, SakhaDebleedProfile],
+    waveform_gate: "SakhaWaveformGateContext | None" = None,
+) -> list[SakhaFrameState]:
+    """"studio" mode — calibrated attribution, with the chatter removed.
+
+    The stock ``calibrated`` decision already produces the right per-region attribution
+    (normalized loudness cancels each mic's gain, so a hot/leaky mic cannot win on raw
+    loudness), but its owner/overlap labels flip on sub-second excursions. Here we take that
+    decision UNCHANGED and acausally de-flicker the label sequences: each mic stays open where
+    calibrated keeps it open for the majority of a short window, short open runs are dropped and
+    brief gaps filled, and the focus is the windowed mode of calibrated's focus. This denoises
+    the decision rather than re-deciding it, so it keeps calibrated's attribution while removing
+    the jitter.
+    """
+    cal = _build_calibrated_frame_states(participants, activities, config, hop_s, profiles)
+    n = len(cal)
+    if n == 0:
+        return []
+    keys = [part.key for part in participants]
+    w = max(1, round(STUDIO_WINDOW_S / hop_s))
+    min_on = max(1, round(STUDIO_MIN_OPEN_S / hop_s))
+    min_off = max(1, round(STUDIO_MIN_GAP_S / hop_s))
+
+    member = {
+        key: np.fromiter((key in cal[i].active_keys for i in range(n)), dtype=bool, count=n)
+        for key in keys
+    }
+    smoothed = {
+        key: _studio_min_run(_studio_rolling_majority(member[key], w), min_on, min_off)
+        for key in keys
+    }
+
+    code = {key: idx for idx, key in enumerate(keys)}
+    raw_owner = np.fromiter(
+        (code.get(cal[i].focus_key, -1) for i in range(n)), dtype=np.int64, count=n
+    )
+    owner = _studio_rolling_mode(raw_owner, w)
+
+    result: list[SakhaFrameState] = []
+    for i in range(n):
+        active_keys = [key for key in keys if smoothed[key][i]]
+        oc = int(owner[i])
+        if oc >= 0 and active_keys and keys[oc] not in active_keys:
+            active_keys.append(keys[oc])
+        result.append(_make_frame_state(participants, activities, i, active_keys, "studio_smoothed"))
     return result
 
 
