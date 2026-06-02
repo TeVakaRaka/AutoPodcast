@@ -77,6 +77,10 @@ class SakhaAymakhConfig:
     camera_all_wide: int
     dominance_delta_db: float = 6.0
     shot_hold_time_s: float = 1.2
+    # A choppy host<->guest exchange goes to the studio wide unless one close camera holds at
+    # least this fraction of the run (then the other is only blipping in and we keep the
+    # floor-holder's close-up). 1.0 = always wide on any exchange; lower = more close-ups.
+    choppy_overlap_dominance: float = 0.70
     overlap_min_hold_s: float = 0.8
     silence_timeout_s: float = 0.8
     max_solo_hold_s: float = 60.0
@@ -225,6 +229,10 @@ class SakhaAymakhConfig:
             raise ValueError("waveform_independent_threshold must be <= waveform_corr_bleed_threshold")
         if self.waveform_downsample_hz < 200:
             raise ValueError("waveform_downsample_hz must be >= 200")
+        if not 0.5 < self.choppy_overlap_dominance <= 1.0:
+            raise ValueError(
+                f"choppy_overlap_dominance must be in (0.5, 1.0], got {self.choppy_overlap_dominance}"
+            )
         for name, value in [
             ("camera_main_host_close", self.camera_main_host_close),
             ("camera_guest_close", self.camera_guest_close),
@@ -413,6 +421,7 @@ def build_sakha_aimakh_plan(
     camera_segments = _merge_camera_segments(camera_segments)
     camera_segments = _insert_reestablishing_wide(camera_segments, config)
     camera_segments = _merge_camera_segments(camera_segments)
+    camera_segments = _consolidate_choppy_camera_runs(camera_segments, config)
     camera_segments = _enforce_min_camera_duration(camera_segments, config)
     camera_segments = _merge_camera_segments(camera_segments)
     camera_segments = _enforce_max_visible_hold(camera_segments, config)
@@ -2875,6 +2884,63 @@ def _segment_min_duration(seg: SakhaCameraSegment, config: SakhaAymakhConfig) ->
     if "overlap" in seg.reason or "pair_wide" in seg.reason:
         return config.overlap_min_hold_s
     return config.shot_hold_time_s
+
+
+def _consolidate_choppy_camera_runs(
+    segments: list[SakhaCameraSegment],
+    config: SakhaAymakhConfig,
+) -> list[SakhaCameraSegment]:
+    """Collapse a "choppy" run of short shots BEFORE the min-duration cleanup, so the cleanup does
+    not merge each fragment into a longer neighbour — which is how a fragmented host turn, wedged
+    between two long guest shots, gets swallowed by the guest even though the host (per the audio
+    plan) is the one talking. A run — 3+ turns, each too short to hold, spanning 2+ cameras and
+    involving at least one close camera (so host<->guest exchanges AND a host/guest turn broken up by
+    overlap-wide fragments both qualify) — is resolved by how it splits between the two close
+    cameras: if one close camera holds at least `choppy_overlap_dominance` of the run it is leading
+    the floor (the rest is brief overlap-wide or the other speaker blipping in) and we ride that
+    close-up; otherwise it is a genuine two-way exchange and we ride the общий план (all_wide). A
+    sustained solo turn, where the other speaker actually stops, is a single >=short segment, never
+    enters a run, and keeps its close-up regardless."""
+    if len(segments) < 3:
+        return segments
+    short = config.shot_hold_time_s * 1.2
+    result: list[SakhaCameraSegment] = []
+    i = 0
+    n = len(segments)
+    while i < n:
+        if segments[i].duration_s >= short:
+            result.append(segments[i])
+            i += 1
+            continue
+        j = i
+        while j < n and segments[j].duration_s < short:
+            j += 1
+        run = segments[i:j]
+        cams = {s.camera_index for s in run}
+        close_cams = {config.camera_main_host_close, config.camera_guest_close}
+        if len(run) >= 3 and len(cams) >= 2 and (cams & close_cams):
+            run_dur = sum(s.duration_s for s in run)
+            host_dur = sum(s.duration_s for s in run if s.camera_index == config.camera_main_host_close)
+            guest_dur = sum(s.duration_s for s in run if s.camera_index == config.camera_guest_close)
+            dom_dur = max(host_dur, guest_dur)
+            if run_dur > 0 and dom_dur >= run_dur * config.choppy_overlap_dominance:
+                # One close camera leads most of the run (the rest is overlap-wide, or the other
+                # speaker only blipping in). Ride that close-up so a fragmented but clearly-led turn
+                # is not absorbed into a neighbouring shot of whoever was talking before/after.
+                if host_dur >= guest_dur:
+                    dom_cam, reason = config.camera_main_host_close, "main_host_close"
+                else:
+                    dom_cam, reason = config.camera_guest_close, "guest_close"
+                result.append(_cam_segment(run[0].start_s, run[-1].end_s, dom_cam, reason, None))
+            else:
+                # Genuine two-way exchange — neither close camera leads — ride the studio wide.
+                result.append(
+                    _cam_segment(run[0].start_s, run[-1].end_s, config.camera_all_wide, "overlap_wide", None)
+                )
+        else:
+            result.extend(run)
+        i = j
+    return result
 
 
 def _enforce_min_camera_duration(
