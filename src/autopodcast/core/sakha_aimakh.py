@@ -16,10 +16,32 @@ from autopodcast.models.domain import SpeakerActivity
 EPS = 1e-9
 SAKHA_MOTION_ENTRY_LOOKAHEAD_S = 1.5
 
-# "studio" mode = calibrated attribution + acausal de-flicker of the open/owner labels.
-STUDIO_WINDOW_S = 0.45      # half-window for the rolling mode / majority smoothing
-STUDIO_MIN_OPEN_S = 0.50    # drop open runs shorter than this (de-flicker)
-STUDIO_MIN_GAP_S = 0.30     # fill closed gaps shorter than this
+# "studio" mode = leak-matrix unmixing. Each mic hears its own speaker plus an
+# attenuated, leaked copy of the others; we estimate the 3x3 leak matrix from clean
+# "anchor" moments, then per frame pick the source set that best reconstructs the
+# observed levels. A mic that is only loud because it catches a neighbour's bleed is
+# never opened (the louder neighbour's hypothesis already predicts that mic's level),
+# so the true (raw-loudest) speaker is held through a monologue instead of thrashing.
+STUDIO_ANCHOR_GAP_DB = 9.0          # a role must lead both others by this to anchor its column
+STUDIO_ANCHOR_FLOOR_MARGIN_DB = 14.0  # ...and sit this far above its own floor
+STUDIO_ANCHOR_MIN_FRAMES = 40       # need this many anchor frames to trust a leak column
+STUDIO_DEFAULT_LEAK_DB = -10.0      # fallback leak when anchors are too sparse
+STUDIO_LEAK_FLOOR_DB = -40.0        # clamp: never model leak weaker than this
+STUDIO_LEAK_CEIL_DB = -1.5          # clamp: a mic always hears its own source loudest
+STUDIO_OVER_W = 1.0                 # weight on UNEXPLAINED energy (obs > predicted)
+STUDIO_UNDER_W = 0.25               # weight on missing energy (obs < predicted); softer
+STUDIO_ACTIVE_SNR_DB = 8.0          # a mic must clear floor+this to be a candidate source
+STUDIO_GLOBAL_SILENCE_SNR_DB = 7.0  # below this for every mic -> the frame is silence
+STUDIO_OVERLAP_MIN_SNR_DB = 16.0    # a 2nd source's own mic must carry this much real signal
+STUDIO_OVERLAP_RESIDUAL_DB = 2.0    # ...and exceed the leader's leak prediction by this
+STUDIO_OVERLAP_SLACK_FRAC = 0.50    # admitting a 2nd source may raise joint error by this frac
+STUDIO_SWITCH_MARGIN = 0.25         # incumbent keeps the frame unless a rival's error is this lower
+STUDIO_MIN_HOLD_S = 0.50            # minimum time before switching away from the owner
+STUDIO_SMOOTH_FILL_S = 0.30         # close membership gaps shorter than this
+STUDIO_SMOOTH_MIN_RUN_S = 0.50      # drop membership runs shorter than this (unless owner)
+STUDIO_XCHECK_CORR = 0.55           # trust waveform residual evidence above this correlation
+STUDIO_XCHECK_BLEED_RESIDUAL_DB = -7.0  # target is bleed of owner if residual <= this
+STUDIO_LEAD_TOL_S = 0.001           # |lag| above which one mic clearly leads
 
 
 class SakhaAymakhState(str, Enum):
@@ -446,7 +468,7 @@ def build_frame_states(
     profiles = debleed_profiles or _build_debleed_profiles(participants, activities, config)
     if config.audio_clean_mode == "studio":
         return _build_studio_frame_states(
-            participants, activities, config, hop_s, profiles,
+            participants, activities, config, hop_s, profiles, waveform_gate,
         )
     if config.audio_clean_mode == "calibrated":
         return _build_calibrated_frame_states(
@@ -1165,76 +1187,164 @@ def _build_calibrated_frame_states(
     return result
 
 
-def _studio_rolling_mode(codes: np.ndarray, w: int) -> np.ndarray:
-    """For each i, the most-common code in [i-w, i+w] among the speaking codes (-1 = silence).
-    Returns -1 where the window holds no speaking frame."""
-    n = len(codes)
-    out = np.full(n, -1, dtype=np.int64)
-    if n == 0:
-        return out
-    k = int(codes.max()) + 1 if codes.max() >= 0 else 0
-    cnt = [0] * max(k, 1)
-    lo = hi = 0
-    for i in range(n):
-        nlo, nhi = max(0, i - w), min(n, i + w + 1)
-        while hi < nhi:
-            c = codes[hi]
-            if c >= 0:
-                cnt[c] += 1
-            hi += 1
-        while lo < nlo:
-            c = codes[lo]
-            if c >= 0:
-                cnt[c] -= 1
-            lo += 1
-        best = -1
-        best_n = 0
-        for c in range(len(cnt)):
-            if cnt[c] > best_n:
-                best_n = cnt[c]
-                best = c
-        out[i] = best
-    return out
+def _studio_percentile(values: np.ndarray, pct: float) -> float:
+    if values.size == 0:
+        return -120.0
+    return float(np.percentile(values, pct))
 
 
-def _studio_rolling_majority(mask: np.ndarray, w: int) -> np.ndarray:
-    """Boolean: True where ``mask`` is True for the strict majority of [i-w, i+w]."""
-    n = len(mask)
-    out = np.zeros(n, dtype=bool)
-    if n == 0:
-        return out
-    c = np.concatenate(([0], np.cumsum(mask.astype(np.int64))))
-    for i in range(n):
-        lo, hi = max(0, i - w), min(n, i + w + 1)
-        out[i] = (c[hi] - c[lo]) * 2 > (hi - lo)
-    return out
-
-
-def _studio_min_run(mask: np.ndarray, min_on: int, min_off: int) -> np.ndarray:
-    """Drop True runs shorter than ``min_on``, then fill interior False gaps shorter than
-    ``min_off`` (leading/trailing gaps are left closed)."""
-    out = mask.copy()
-    n = len(out)
-
-    def _runs(val):
-        i = 0
-        while i < n:
-            if out[i] == val:
-                j = i
-                while j < n and out[j] == val:
-                    j += 1
-                yield i, j
-                i = j
+def _studio_estimate_leak_matrix(
+    keys: list[str],
+    env: dict[str, np.ndarray],
+    floor_db: dict[str, float],
+    n: int,
+) -> dict[str, dict[str, float]]:
+    """leak[i][j] in dB = typical level of role j seen in mic i, relative to j's own mic.
+    Diagonal 0; columns with too few anchor frames fall back to STUDIO_DEFAULT_LEAK_DB."""
+    leak: dict[str, dict[str, float]] = {i: {} for i in keys}
+    for j in keys:
+        others = [k for k in keys if k != j]
+        mask = np.ones(n, dtype=bool)
+        for o in others:
+            mask &= env[j][:n] >= env[o][:n] + STUDIO_ANCHOR_GAP_DB
+        mask &= env[j][:n] >= floor_db[j] + STUDIO_ANCHOR_FLOOR_MARGIN_DB
+        have = int(mask.sum())
+        for i in keys:
+            if i == j:
+                leak[i][j] = 0.0
+                continue
+            if have >= STUDIO_ANCHOR_MIN_FRAMES:
+                val = float(np.median(env[i][:n][mask] - env[j][:n][mask]))
             else:
-                i += 1
+                val = STUDIO_DEFAULT_LEAK_DB
+            leak[i][j] = min(STUDIO_LEAK_CEIL_DB, max(STUDIO_LEAK_FLOOR_DB, val))
+    return leak
 
-    for a, b in list(_runs(True)):
-        if b - a < min_on:
-            out[a:b] = False
-    for a, b in list(_runs(False)):
-        if a > 0 and b < n and b - a < min_off:
-            out[a:b] = True
-    return out
+
+def _studio_hypothesis_error(
+    obs: dict[str, float],
+    source: str,
+    keys: list[str],
+    leak: dict[str, dict[str, float]],
+    floor_db: dict[str, float],
+) -> tuple[float, dict[str, float]]:
+    """Reconstruction error for the single-source hypothesis ``source`` plus per-mic residual.
+
+    Predict each mic i as level_source + leak[i][source], floored at the mic's noise level;
+    unexplained energy (a mic louder than predicted -> another source is contributing) is
+    penalised harder than missing energy, so a hypothesis that ignores a genuinely-loud rival
+    mic scores badly. This is what overturns the 364-class bug."""
+    level = obs[source]
+    err = 0.0
+    residual: dict[str, float] = {}
+    for i in keys:
+        pred = max(level + leak[i][source], floor_db[i])
+        obs_eff = max(obs[i], floor_db[i])
+        r = obs_eff - pred
+        residual[i] = r
+        if r >= 0.0:
+            err += STUDIO_OVER_W * r * r
+        else:
+            err += STUDIO_UNDER_W * r * r
+    return err, residual
+
+
+def _studio_pair_error(
+    obs: dict[str, float],
+    s1: str,
+    s2: str,
+    keys: list[str],
+    leak: dict[str, dict[str, float]],
+    floor_db: dict[str, float],
+) -> float:
+    """Reconstruction error for the 2-source hypothesis {s1, s2}: each mic is predicted as the
+    louder (in dB) of the two sources' contributions."""
+    l1 = obs[s1]
+    l2 = obs[s2]
+    err = 0.0
+    for i in keys:
+        pred = max(l1 + leak[i][s1], l2 + leak[i][s2], floor_db[i])
+        obs_eff = max(obs[i], floor_db[i])
+        r = obs_eff - pred
+        if r >= 0.0:
+            err += STUDIO_OVER_W * r * r
+        else:
+            err += STUDIO_UNDER_W * r * r
+    return err
+
+
+def _studio_fill_short_gaps(mask: list[bool], max_gap: int) -> None:
+    n = len(mask)
+    idx = 0
+    while idx < n:
+        if mask[idx]:
+            idx += 1
+            continue
+        start = idx
+        while idx < n and not mask[idx]:
+            idx += 1
+        if start > 0 and idx < n and (idx - start) < max_gap:
+            for pos in range(start, idx):
+                mask[pos] = True
+
+
+def _studio_drop_short_runs(
+    mask: list[bool], min_run: int, owner_seq: list[str | None], key: str
+) -> None:
+    """Remove True runs shorter than ``min_run`` UNLESS the role is the frame owner anywhere in
+    the run (a real solo turn must never be deleted)."""
+    n = len(mask)
+    idx = 0
+    while idx < n:
+        if not mask[idx]:
+            idx += 1
+            continue
+        start = idx
+        while idx < n and mask[idx]:
+            idx += 1
+        if (idx - start) < min_run and not any(owner_seq[p] == key for p in range(start, idx)):
+            for pos in range(start, idx):
+                mask[pos] = False
+
+
+def _studio_is_waveform_bleed(owner: str, target: str, waveform_gate, time_s: float) -> bool:
+    """True when ``target``'s mic is a lag-aligned scaled copy of ``owner`` (pure bleed)."""
+    if waveform_gate is None or not getattr(waveform_gate, "available", False):
+        return False
+    ev = waveform_gate.residual_evidence(owner, target, time_s)
+    if ev is None or not ev.available:
+        return False
+    return ev.correlation >= STUDIO_XCHECK_CORR and ev.residual_to_target_db <= STUDIO_XCHECK_BLEED_RESIDUAL_DB
+
+
+def _studio_waveform_override(
+    chosen: str,
+    candidates: list[str],
+    single_err: dict[str, float],
+    waveform_gate,
+    time_s: float,
+) -> str:
+    """If ``chosen``'s mic is largely a lag-aligned scaled copy of another candidate, the chosen
+    "source" is really that other speaker's bleed -> return the true source. Covers the sacred
+    "leak louder than direct" case; direction resolved by lag (the leader is the source)."""
+    if waveform_gate is None or not getattr(waveform_gate, "available", False):
+        return chosen
+    best = chosen
+    for other in candidates:
+        if other == best:
+            continue
+        ev = waveform_gate.residual_evidence(other, best, time_s)
+        if ev is None or not ev.available:
+            continue
+        if ev.correlation >= STUDIO_XCHECK_CORR and ev.residual_to_target_db <= STUDIO_XCHECK_BLEED_RESIDUAL_DB:
+            sim = waveform_gate.similarity(other, best, time_s)
+            lead_other = sim is not None and sim.lag_s > STUDIO_LEAD_TOL_S
+            lead_best = sim is not None and sim.lag_s < -STUDIO_LEAD_TOL_S
+            if lead_other:
+                best = other
+            elif not lead_best and single_err.get(other, float("inf")) < single_err.get(best, float("inf")):
+                best = other
+    return best
 
 
 def _build_studio_frame_states(
@@ -1245,48 +1355,131 @@ def _build_studio_frame_states(
     profiles: dict[str, SakhaDebleedProfile],
     waveform_gate: "SakhaWaveformGateContext | None" = None,
 ) -> list[SakhaFrameState]:
-    """"studio" mode — calibrated attribution, with the chatter removed.
+    """"studio" mode -- leak-matrix unmixing.
 
-    The stock ``calibrated`` decision already produces the right per-region attribution
-    (normalized loudness cancels each mic's gain, so a hot/leaky mic cannot win on raw
-    loudness), but its owner/overlap labels flip on sub-second excursions. Here we take that
-    decision UNCHANGED and acausally de-flicker the label sequences: each mic stays open where
-    calibrated keeps it open for the majority of a short window, short open runs are dropped and
-    brief gaps filled, and the focus is the windowed mode of calibrated's focus. This denoises
-    the decision rather than re-deciding it, so it keeps calibrated's attribution while removing
-    the jitter.
+    Models each mic as its own speaker plus an attenuated leaked copy of the others, estimates the
+    3x3 leak matrix from clean anchor frames, then per frame chooses the source set that best
+    reconstructs the observed levels. Leakage is explained away, so a mic that is only loud because
+    it is catching a louder neighbour's bleed is never opened -- the true (raw-loudest) speaker is
+    held through a monologue and the leak is muted, instead of thrashing between mics. A waveform
+    residual cross-check guards the rare "leak louder than direct" case; light hysteresis + membership
+    smoothing keep the timeline clean.
     """
-    cal = _build_calibrated_frame_states(participants, activities, config, hop_s, profiles)
-    n = len(cal)
-    if n == 0:
+    if not participants:
         return []
     keys = [part.key for part in participants]
-    w = max(1, round(STUDIO_WINDOW_S / hop_s))
-    min_on = max(1, round(STUDIO_MIN_OPEN_S / hop_s))
-    min_off = max(1, round(STUDIO_MIN_GAP_S / hop_s))
+    n = min(len(activities[k].frames) for k in keys)
+    if n <= 0:
+        return []
 
-    member = {
-        key: np.fromiter((key in cal[i].active_keys for i in range(n)), dtype=bool, count=n)
-        for key in keys
+    env: dict[str, np.ndarray] = {
+        k: np.asarray([f.envelope_db for f in activities[k].frames[:n]], dtype=np.float64)
+        for k in keys
     }
-    smoothed = {
-        key: _studio_min_run(_studio_rolling_majority(member[key], w), min_on, min_off)
-        for key in keys
-    }
+    floor_db: dict[str, float] = {}
+    for k in keys:
+        prof = (profiles or {}).get(k)
+        floor_db[k] = prof.floor_db if prof is not None else _studio_percentile(env[k], 10.0)
 
-    code = {key: idx for idx, key in enumerate(keys)}
-    raw_owner = np.fromiter(
-        (code.get(cal[i].focus_key, -1) for i in range(n)), dtype=np.int64, count=n
-    )
-    owner = _studio_rolling_mode(raw_owner, w)
+    leak = _studio_estimate_leak_matrix(keys, env, floor_db, n)
+    min_hold_frames = max(1, ceil(STUDIO_MIN_HOLD_S / hop_s))
+
+    owner_seq: list[str | None] = [None] * n
+    overlap_seq: list[set[str]] = [set() for _ in range(n)]
+    reason_seq: list[str] = ["studio_silence"] * n
+    owner: str | None = None
+    owner_since = 0
+
+    for idx in range(n):
+        time_s = activities[keys[0]].frames[idx].time_s
+        candidates = [
+            k
+            for k in keys
+            if activities[k].frames[idx].is_active
+            and (env[k][idx] - floor_db[k]) >= STUDIO_ACTIVE_SNR_DB
+        ]
+        if not candidates:
+            owner = None
+            continue
+        best_snr = max(env[k][idx] - floor_db[k] for k in candidates)
+        if best_snr < STUDIO_GLOBAL_SILENCE_SNR_DB:
+            reason_seq[idx] = "studio_low_energy"
+            owner = None
+            continue
+        if len(candidates) == 1:
+            best_src = candidates[0]
+            owner_seq[idx] = best_src
+            reason_seq[idx] = "studio_single_raw"
+            if best_src != owner:
+                owner = best_src
+                owner_since = idx
+            continue
+
+        obs = {k: float(env[k][idx]) for k in keys}
+        single_err: dict[str, float] = {}
+        single_res: dict[str, dict[str, float]] = {}
+        for s in candidates:
+            e, res = _studio_hypothesis_error(obs, s, keys, leak, floor_db)
+            single_err[s] = e
+            single_res[s] = res
+        best_src = min(single_err, key=lambda s: single_err[s])
+        best_e = single_err[best_src]
+
+        if owner is not None and owner in single_err and owner != best_src:
+            held = (idx - owner_since) < min_hold_frames
+            owner_e = single_err[owner]
+            margin = STUDIO_SWITCH_MARGIN * max(owner_e, 1.0)
+            if held or (owner_e - best_e) < margin:
+                best_src = owner
+                best_e = owner_e
+
+        best_src = _studio_waveform_override(best_src, candidates, single_err, waveform_gate, time_s)
+        best_e = single_err[best_src]
+
+        res_leader = single_res[best_src]
+        overlap_keys: set[str] = set()
+        for s2 in candidates:
+            if s2 == best_src:
+                continue
+            if (env[s2][idx] - floor_db[s2]) < STUDIO_OVERLAP_MIN_SNR_DB:
+                continue
+            if res_leader.get(s2, -120.0) < STUDIO_OVERLAP_RESIDUAL_DB:
+                continue
+            if _studio_is_waveform_bleed(best_src, s2, waveform_gate, time_s):
+                continue
+            pair_e = _studio_pair_error(obs, best_src, s2, keys, leak, floor_db)
+            if pair_e <= best_e * (1.0 + STUDIO_OVERLAP_SLACK_FRAC):
+                overlap_keys.add(s2)
+
+        owner_seq[idx] = best_src
+        overlap_seq[idx] = overlap_keys
+        reason_seq[idx] = "studio_true_overlap" if overlap_keys else "studio_bleed_suppressed"
+        if best_src != owner:
+            owner = best_src
+            owner_since = idx
+
+    open_mask = {k: [False] * n for k in keys}
+    for idx in range(n):
+        o = owner_seq[idx]
+        if o is not None:
+            open_mask[o][idx] = True
+        for k in overlap_seq[idx]:
+            open_mask[k][idx] = True
+
+    fill_frames = max(1, round(STUDIO_SMOOTH_FILL_S / hop_s))
+    min_run_frames = max(1, round(STUDIO_SMOOTH_MIN_RUN_S / hop_s))
+    for k in keys:
+        m = open_mask[k]
+        _studio_fill_short_gaps(m, fill_frames)
+        _studio_drop_short_runs(m, min_run_frames, owner_seq, k)
+        open_mask[k] = m
 
     result: list[SakhaFrameState] = []
-    for i in range(n):
-        active_keys = [key for key in keys if smoothed[key][i]]
-        oc = int(owner[i])
-        if oc >= 0 and active_keys and keys[oc] not in active_keys:
-            active_keys.append(keys[oc])
-        result.append(_make_frame_state(participants, activities, i, active_keys, "studio_smoothed"))
+    for idx in range(n):
+        active_keys = [k for k in keys if open_mask[k][idx]]
+        if owner_seq[idx] is not None and owner_seq[idx] not in active_keys:
+            active_keys.append(owner_seq[idx])
+        result.append(_make_frame_state(participants, activities, idx, active_keys, reason_seq[idx]))
     return result
 
 

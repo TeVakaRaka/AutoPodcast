@@ -829,55 +829,90 @@ def test_calibrated_mode_opens_both_mics_on_genuine_overlap():
     assert plan.frame_states[20].state == SakhaAymakhState.COHOST_GUEST
 
 
-def test_studio_mode_picks_real_speaker_over_overgained_bleed():
-    """studio mode keeps calibrated's normalized attribution, so it makes the same call as
-    calibrated on the over-gained-bleed scenario: the guest's quiet direct voice wins over the
-    cohost's louder bleed."""
+def test_studio_mode_guest_much_louder_picks_guest():
+    """Guest clearly loudest (guest -20, cohost only -34 leak, main silent): leak-matrix
+    unmixing opens the guest mic and keeps the cohost (bleed) mic closed."""
     cfg = _config(audio_clean_mode="studio")
     plan = _plan(
         {
-            "main_host": _level_activity("main_host", [], 6.0, default_db=-70.0),
-            "cohost": _level_activity(
-                "cohost", [(0.0, 3.0, -8.0), (3.0, 6.0, -22.0)], 6.0, default_db=-50.0
-            ),
-            "guest": _level_activity("guest", [(3.0, 6.0, -30.0)], 6.0, default_db=-70.0),
-        },
-        6.0,
-        cfg,
-    )
-    assert plan.frame_states[10].active_keys == ("cohost",)
-    assert plan.frame_states[45].active_keys == ("guest",)
-    assert plan.frame_states[45].state == SakhaAymakhState.GUEST_ONLY
-
-
-def test_studio_mode_opens_both_mics_on_genuine_overlap():
-    """Two channels both near their own reference are both really talking -> both open."""
-    cfg = _config(audio_clean_mode="studio")
-    plan = _plan(
-        {
-            "main_host": _level_activity("main_host", [], 4.0, default_db=-70.0),
-            "cohost": _level_activity("cohost", [(0.0, 4.0, -20.0)], 4.0, default_db=-60.0),
-            "guest": _level_activity("guest", [(0.0, 4.0, -25.0)], 4.0, default_db=-70.0),
+            "main_host": _level_activity("main_host", [], 4.0, default_db=-60.0),
+            "cohost": _level_activity("cohost", [(0.5, 3.5, -34.0)], 4.0, default_db=-60.0),
+            "guest": _level_activity("guest", [(0.5, 3.5, -20.0)], 4.0, default_db=-60.0),
         },
         4.0,
         cfg,
     )
-    assert set(plan.frame_states[20].active_keys) == {"cohost", "guest"}
+    frame = plan.frame_states[20]
+    assert "guest" in frame.active_keys
+    assert "cohost" not in frame.active_keys
+    assert frame.state == SakhaAymakhState.GUEST_ONLY
 
 
-def test_studio_mode_has_no_subhalfsecond_open_intervals():
-    """studio mode de-flickers the open/close labels: no audio open interval is shorter than
-    the 0.5 s minimum, even on rapidly alternating turns."""
+def test_studio_mode_leak_louder_than_direct_picks_source():
+    """The cohost mic catches the guest's voice LOUDER (-26) than the guest's own mic (-34), but
+    it is a lag-aligned scaled copy: the waveform cross-check keeps the guest (true source) open
+    and the cohost (bleed) muted."""
+    sr = 1000
+    guest_voice = _speech_noise(5.0, sr, [(0.0, 2.0)], seed=1)
+    audio = {
+        "main_host": np.zeros_like(guest_voice),
+        "cohost": 1.8 * _delay(guest_voice, 4),
+        "guest": guest_voice,
+    }
     cfg = _config(audio_clean_mode="studio")
     plan = _plan(
         {
-            "main_host": _level_activity("main_host", [(0.0, 2.0, -20.0)], 6.0, default_db=-65.0),
-            "cohost": _level_activity("cohost", [(2.0, 4.0, -20.0)], 6.0, default_db=-65.0),
-            "guest": _level_activity("guest", [(4.0, 6.0, -20.0)], 6.0, default_db=-65.0),
+            "main_host": _level_activity("main_host", [], 5.0, default_db=-70.0),
+            "cohost": _level_activity("cohost", [(0.0, 2.0, -26.0)], 5.0, default_db=-65.0),
+            "guest": _level_activity("guest", [(0.0, 2.0, -34.0), (2.0, 3.0, -18.0)], 5.0, default_db=-62.0),
         },
-        6.0,
+        5.0,
+        cfg,
+        audio_arrays_by_key=audio,
+        audio_sample_rate=sr,
+    )
+    for idx in (5, 10):
+        frame = plan.frame_states[idx]
+        assert frame.active_keys == ("guest",), (idx, frame.active_keys)
+        assert "cohost" not in frame.active_keys
+    assert plan.audio_open_intervals_s[1] == [], "cohost bleed must stay muted"
+
+
+def test_studio_mode_independent_overlap_opens_both():
+    """Two genuinely independent speakers (uncorrelated waveforms) at solid levels both open."""
+    sr = 1000
+    audio = {
+        "main_host": np.zeros(int(4.0 * sr), dtype=np.float64),
+        "cohost": _speech_noise(4.0, sr, [(0.0, 2.5)], seed=3),
+        "guest": _speech_noise(4.0, sr, [(0.0, 2.5)], seed=4),
+    }
+    cfg = _config(audio_clean_mode="studio")
+    plan = _plan(
+        {
+            "main_host": _level_activity("main_host", [], 4.0, default_db=-70.0),
+            "cohost": _level_activity("cohost", [(0.0, 2.5, -22.0)], 4.0, default_db=-65.0),
+            "guest": _level_activity("guest", [(0.0, 2.5, -20.0)], 4.0, default_db=-62.0),
+        },
+        4.0,
+        cfg,
+        audio_arrays_by_key=audio,
+        audio_sample_rate=sr,
+    )
+    assert set(plan.frame_states[12].active_keys) == {"cohost", "guest"}
+
+
+def test_studio_mode_no_audio_fallback_is_deterministic():
+    """Without per-track audio the leak-matrix fallback still picks the clearly-loudest source."""
+    cfg = _config(audio_clean_mode="studio")
+    plan = _plan(
+        {
+            "main_host": _level_activity("main_host", [(0.5, 3.5, -18.0)], 4.0, default_db=-60.0),
+            "cohost": _level_activity("cohost", [(0.5, 3.5, -40.0)], 4.0, default_db=-60.0),
+            "guest": _level_activity("guest", [], 4.0, default_db=-60.0),
+        },
+        4.0,
         cfg,
     )
-    for track, intervals in plan.audio_open_intervals_s.items():
-        for start_s, end_s in intervals:
-            assert (end_s - start_s) >= 0.5 - 1e-6, f"short open {end_s - start_s:.3f}s on track {track}"
+    frame = plan.frame_states[20]
+    assert frame.active_keys == ("main_host",), frame.active_keys
+    assert frame.state == SakhaAymakhState.MAIN_HOST_ONLY
