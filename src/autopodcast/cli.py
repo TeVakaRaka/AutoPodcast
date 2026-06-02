@@ -806,14 +806,64 @@ def calibrate(mic_a, mic_b, label_a, label_b, window, percentile, margin):
     )
 
 
+def _resolve_speaker_mics(in_file, seq, specs, xml_file):
+    """Auto-resolve any missing speaker microphone from the input .prproj/XML sequence
+    audio tracks, mirroring auto-switch-sakha-aimakh. ``specs`` is a list of
+    ``(audio_track_index_0based, label, mic_path_or_None)`` in speaker order. The project is
+    only parsed when at least one mic is missing; manually supplied --mic paths pass through.
+
+    Returns ``(resolved_paths, audio_sources_log_or_None, mute_audio_ok)``.
+    """
+    resolved: list[Path | None] = [Path(p) if p is not None else None for (_ti, _lbl, p) in specs]
+    track_indices = [ti for (ti, _lbl, _p) in specs]
+    labels = [lbl for (_ti, lbl, _p) in specs]
+    audio_sources_log = None
+    if any(p is None for p in resolved):
+        try:
+            sources = resolve_sequence_audio_sources(
+                Path(in_file), seq, track_indices, xml_path=xml_file
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Audio sources: {sources.method}")
+        audio_sources_log = {"event": "audio_sources", "method": sources.method, "tracks": {}}
+        for i, ti in enumerate(track_indices):
+            source = sources.sources_by_track[ti]
+            if resolved[i] is None:
+                resolved[i] = source.representative_path
+            click.echo(f"  {labels[i]}: track {ti + 1} -> {resolved[i]}")
+            audio_sources_log["tracks"][str(ti)] = {
+                "label": labels[i],
+                "name": source.name,
+                "path": str(source.representative_path),
+                "paths": [str(pp) for pp in source.paths],
+            }
+    if any(p is None for p in resolved):
+        raise click.ClickException(
+            "Missing microphone paths. Provide the --mic option(s) manually or let the command "
+            "resolve them from audio tracks in the .prproj/XML."
+        )
+    mute_audio_ok = True
+    unique = {str(p.resolve()) for p in resolved}
+    if len(unique) < len(resolved):
+        click.echo(
+            "Warning: несколько дорожек указывают на один и тот же аудиофайл — "
+            "раздельный анализ по спикерам невозможен. Укажите отдельные файлы через --mic; "
+            "заглушение дорожек отключено.",
+            err=True,
+        )
+        mute_audio_ok = False
+    return resolved, audio_sources_log, mute_audio_ok
+
+
 @cli.command("auto-switch-4cams")
 @click.option("--in", "in_file", required=True, type=click.Path(exists=True), help="Input .prproj file")
 @click.option("--seq", required=True, help="Sequence name in .prproj")
 @click.option("--out", "out_file", required=True, type=click.Path(), help="Output .prproj file")
-@click.option("--mic-host", required=True, type=click.Path(exists=True), help="Host microphone audio file")
-@click.option("--mic-guest-1", required=True, type=click.Path(exists=True), help="Guest 1 microphone audio file")
-@click.option("--mic-guest-2", required=True, type=click.Path(exists=True), help="Guest 2 microphone audio file")
-@click.option("--mic-guest-3", required=True, type=click.Path(exists=True), help="Guest 3 microphone audio file")
+@click.option("--mic-host", type=click.Path(exists=True), help="Host microphone audio file (empty = auto-resolve from project)")
+@click.option("--mic-guest-1", type=click.Path(exists=True), help="Guest 1 microphone audio file (empty = auto-resolve from project)")
+@click.option("--mic-guest-2", type=click.Path(exists=True), help="Guest 2 microphone audio file (empty = auto-resolve from project)")
+@click.option("--mic-guest-3", type=click.Path(exists=True), help="Guest 3 microphone audio file (empty = auto-resolve from project)")
 @click.option("--label-host", default="host", help="Label for host track")
 @click.option("--label-guest-1", default="guest_1", help="Label for guest 1 track")
 @click.option("--label-guest-2", default="guest_2", help="Label for guest 2 track")
@@ -901,6 +951,19 @@ def auto_switch_4cams_cmd(
     camera_guests_wide -= 1
     camera_guest_close -= 1
     camera_host_close -= 1
+
+    _resolved_mics, _audio_sources_log, _mute_ok = _resolve_speaker_mics(
+        in_file, seq,
+        [
+            (audio_track_host - 1, label_host, mic_host),
+            (audio_track_guest_1 - 1, label_guest_1, mic_guest_1),
+            (audio_track_guest_2 - 1, label_guest_2, mic_guest_2),
+            (audio_track_guest_3 - 1, label_guest_3, mic_guest_3),
+        ],
+        xml_file,
+    )
+    mic_host, mic_guest_1, mic_guest_2, mic_guest_3 = _resolved_mics
+    mute_audio = mute_audio and _mute_ok
 
     participant_specs = [
         ParticipantSpec(key="host", label=label_host, role="host", audio_track_index=audio_track_host - 1),
@@ -2088,8 +2151,8 @@ def auto_switch_sakha_aimakh_cmd(
 
 @cli.command("auto-multicam")
 @click.option("--in", "in_file", required=True, type=click.Path(exists=True), help="Input .prproj file")
-@click.option("--mic-a", required=True, type=click.Path(exists=True), help="Host microphone audio file")
-@click.option("--mic-b", required=True, type=click.Path(exists=True), help="Guest microphone audio file")
+@click.option("--mic-a", type=click.Path(exists=True), help="Host microphone audio file (empty = auto-resolve from project)")
+@click.option("--mic-b", type=click.Path(exists=True), help="Guest microphone audio file (empty = auto-resolve from project)")
 @click.option("--seq", required=True, help="Sequence name in .prproj")
 @click.option("--out", "out_file", required=True, type=click.Path(), help="Output .prproj file")
 @click.option("--label-a", default="host", help="Label for speaker A (default: host)")
@@ -2097,7 +2160,7 @@ def auto_switch_sakha_aimakh_cmd(
 @click.option("--camera-host", default=1, type=int, help="Premiere angle for host (1-based, default: 1)")
 @click.option("--camera-guest", default=2, type=int, help="Premiere angle for guest (1-based, default: 2)")
 @click.option("--camera-wide", default=3, type=int, help="Premiere angle for wide/both/silence (1-based, default: 3)")
-@click.option("--speech-threshold", default=-24.0, type=float, help="Speech onset threshold in dB")
+@click.option("--speech-threshold", default=-27.0, type=float, help="Speech onset threshold in dB")
 @click.option("--input-gain", default=0.0, type=float, help="Input gain in dB (applied to both mics unless per-mic gain set)")
 @click.option("--input-gain-a", default=0.0, type=float, help="Input gain for mic A (host) in dB, overrides --input-gain")
 @click.option("--input-gain-b", default=0.0, type=float, help="Input gain for mic B (guest) in dB, overrides --input-gain")
@@ -2109,14 +2172,15 @@ def auto_switch_sakha_aimakh_cmd(
 @click.option("--vad-min-silence-ms", default=80.0, type=float, help="Silero VAD minimum silence duration in ms")
 @click.option("--vad-speech-pad-ms", default=30.0, type=float, help="Silero VAD padding around detected speech in ms")
 @click.option("--audio-mute-min-segment", default=500.0, type=float, help="Minimum audio mute segment length in ms")
-@click.option("--audio-pre-roll", default=0.35, type=float, help="Open speaker audio this many seconds before detected onset")
-@click.option("--audio-post-roll", default=0.10, type=float, help="Keep speaker audio open this many seconds after detected end")
+@click.option("--audio-pre-roll", default=0.24, type=float, help="Open speaker audio this many seconds before detected onset")
+@click.option("--audio-post-roll", default=0.12, type=float, help="Keep speaker audio open this many seconds after detected end")
 @click.option("--dialogue-wide-interval", default=24.0, type=float, help="Minimum seconds between re-establishing wide shots during active dialogue")
 @click.option("--dialogue-wide-duration", default=2.0, type=float, help="Duration of each re-establishing dialogue wide shot in seconds")
 @click.option("--dialogue-wide-min-turns", default=3, type=int, help="Minimum speaker exchanges before inserting a dialogue wide shot")
 @click.option("--log/--no-log", default=True, help="Write JSONL log file next to output (default: on)")
 @click.option("--audio-track-host", default=1, type=int, help="Audio track number for host (1-based, default: 1)")
 @click.option("--audio-track-guest", default=2, type=int, help="Audio track number for guest (1-based, default: 2)")
+@click.option("--xml", "xml_file", type=click.Path(exists=True), help="Premiere FCP7 XML export for more reliable audio/camera source resolution")
 @click.option("--fps", default=0.0, type=float, help="Sequence frame rate for frame-aligned cuts (0 = auto-detect from .prproj)")
 @_cross_cancel_options(default_enabled=True)
 def auto_multicam_cmd(
@@ -2129,7 +2193,7 @@ def auto_multicam_cmd(
     audio_mute_min_segment, audio_pre_roll, audio_post_roll,
     dialogue_wide_interval, dialogue_wide_duration, dialogue_wide_min_turns, log,
     audio_track_host, audio_track_guest,
-    fps,
+    fps, xml_file,
     enable_cross_cancel, cross_cancel_fir_taps,
 ):
     """Full pipeline: analyze audio -> switch cameras -> patch .prproj."""
@@ -2148,6 +2212,17 @@ def auto_multicam_cmd(
     camera_host -= 1
     camera_guest -= 1
     camera_wide -= 1
+
+    _resolved_mics, _audio_sources_log, _mute_ok = _resolve_speaker_mics(
+        in_file, seq,
+        [
+            (audio_track_host - 1, label_a, mic_a),
+            (audio_track_guest - 1, label_b, mic_b),
+        ],
+        xml_file,
+    )
+    mic_a, mic_b = _resolved_mics
+    mute_audio = mute_audio and _mute_ok
 
     # 1. Build config and load audio
     config = build_config(
@@ -2388,7 +2463,7 @@ def auto_multicam_cmd(
 
 @cli.command("auto-switch-monologue")
 @click.option("--in", "in_file", required=True, type=click.Path(exists=True), help="Input .prproj file")
-@click.option("--mic", required=True, type=click.Path(exists=True), help="Narrator microphone audio file")
+@click.option("--mic", type=click.Path(exists=True), help="Narrator microphone audio file (empty = auto-resolve from project)")
 @click.option("--seq", required=True, help="Sequence name in .prproj")
 @click.option("--out", "out_file", required=True, type=click.Path(), help="Output .prproj file")
 @click.option("--label", default="narrator", help="Label for narrator track")
@@ -2456,6 +2531,8 @@ def auto_switch_monologue_cmd(
 
     camera_main -= 1
     camera_accent -= 1
+
+    mic = _resolve_speaker_mics(in_file, seq, [(audio_track - 1, label, mic)], xml_file)[0][0]
 
     analysis_config = ProjectConfig(
         audio_inputs=[

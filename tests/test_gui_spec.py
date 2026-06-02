@@ -56,13 +56,13 @@ class TestBuildArgvDefaults:
                 assert f.arg not in argv, f"{f.arg} leaked at default"
 
     def test_multicam_default_argv_exact(self):
+        # mic-a/mic-b are optional (auto-resolved from the project) — at defaults
+        # they are empty and must not appear in argv, like SAKHA.
         spec = mode_by_key("multicam")
         argv = build_argv(spec, _filled(spec))
         assert argv == [
             "auto-multicam",
             "--in", "/proj/Episode.prproj",
-            "--mic-a", "/proj/mic.wav",
-            "--mic-b", "/proj/mic.wav",
             "--seq", "Sequence 01",
             "--out", "/proj/Episode_multicam.prproj",
         ]
@@ -146,6 +146,32 @@ class TestBuildArgvOutput:
         argv = build_argv(spec, _filled(spec, **{"--mic-guest": "/proj/g.wav"}))
         assert "--mic-guest" in argv
         assert argv[argv.index("--mic-guest") + 1] == "/proj/g.wav"
+
+    def test_multicam_optional_mics_omitted_when_empty(self):
+        """auto-multicam mics are optional (auto-resolved) — empty -> not in argv."""
+        spec = mode_by_key("multicam")
+        argv = build_argv(spec, _filled(spec))
+        for arg in ("--mic-a", "--mic-b"):
+            assert arg not in argv
+
+    def test_multicam_optional_mic_emitted_when_set(self):
+        spec = mode_by_key("multicam")
+        argv = build_argv(spec, _filled(spec, **{"--mic-a": "/proj/a.wav"}))
+        assert "--mic-a" in argv
+        assert argv[argv.index("--mic-a") + 1] == "/proj/a.wav"
+
+    def test_4cams_optional_mics_omitted_when_empty(self):
+        """auto-switch-4cams mics are optional (auto-resolved) — empty -> not in argv."""
+        spec = mode_by_key("4cams")
+        argv = build_argv(spec, _filled(spec))
+        for arg in ("--mic-host", "--mic-guest-1", "--mic-guest-2", "--mic-guest-3"):
+            assert arg not in argv
+
+    def test_monologue_optional_mic_omitted_when_empty(self):
+        """auto-switch-monologue mic is optional (auto-resolved) — empty -> not in argv."""
+        spec = mode_by_key("monologue")
+        argv = build_argv(spec, _filled(spec))
+        assert "--mic" not in argv
 
 
 # ---------------------------------------------------------------------------
