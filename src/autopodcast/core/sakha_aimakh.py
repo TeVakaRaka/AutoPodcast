@@ -15,6 +15,9 @@ from autopodcast.models.domain import SpeakerActivity
 
 EPS = 1e-9
 SAKHA_MOTION_ENTRY_LOOKAHEAD_S = 1.5
+# Hold the current speaker's camera through pauses shorter than this instead of flashing to the
+# wide; only a longer silence cuts to the общий план.
+SAKHA_CAMERA_HOLD_SILENCE_S = 2.5
 
 # "studio" mode = leak-matrix unmixing. Each mic hears its own speaker plus an
 # attenuated, leaked copy of the others; we estimate the 3x3 leak matrix from clean
@@ -82,8 +85,8 @@ class SakhaAymakhConfig:
     cutaway_duration_s: float = 2.2
     cut_search_window_s: float = 5.0
     forced_min_drop_db: float = 3.0
-    reestablish_all_wide_interval_s: float = 25.0
-    reestablish_all_wide_duration_s: float = 1.8
+    reestablish_all_wide_interval_s: float = 14.0
+    reestablish_all_wide_duration_s: float = 3.0
     reestablish_min_turns: int = 3
     audio_min_on_s: float = 0.28
     audio_merge_gap_s: float = 0.22
@@ -406,6 +409,8 @@ def build_sakha_aimakh_plan(
         activities,
         config,
     )
+    camera_segments = _hold_camera_through_brief_silence(camera_segments, config)
+    camera_segments = _merge_camera_segments(camera_segments)
     camera_segments = _insert_reestablishing_wide(camera_segments, config)
     camera_segments = _merge_camera_segments(camera_segments)
     camera_segments = _enforce_min_camera_duration(camera_segments, config)
@@ -615,9 +620,12 @@ def build_camera_segments_from_speech(
                     seg,
                     activities,
                     primary_camera=config.camera_guest_close,
-                    cutaway_camera=config.camera_pair_wide,
+                    # Re-establish on the full studio wide, not the co-host pair shot:
+                    # the co-host is usually silent, so the pair shot is dead weight —
+                    # the editor cuts to the общий план for variety instead.
+                    cutaway_camera=config.camera_all_wide,
                     primary_reason="guest_close",
-                    cutaway_reason="guest_pair_cutaway",
+                    cutaway_reason="guest_wide_cutaway",
                     interval_s=config.guest_cutaway_interval_s,
                     config=config,
                 )
@@ -2798,43 +2806,63 @@ def _merge_camera_segments(segments: list[SakhaCameraSegment]) -> list[SakhaCame
     return merged
 
 
+def _hold_camera_through_brief_silence(
+    segments: list[SakhaCameraSegment],
+    config: SakhaAymakhConfig,
+) -> list[SakhaCameraSegment]:
+    """Keep the current speaker's camera through brief pauses instead of flashing to the wide on
+    every micro-pause. Only a sustained silence (>= SAKHA_CAMERA_HOLD_SILENCE_S) still cuts to the
+    общий план. This stops the flashing AND lets the periodic re-establish timer accumulate so a
+    long monologue gets a few deliberate wide inserts instead of many pause-flashes."""
+    if not segments:
+        return segments
+    result = list(segments)
+    for i, seg in enumerate(result):
+        if seg.reason != "silence" or seg.duration_s >= SAKHA_CAMERA_HOLD_SILENCE_S:
+            continue
+        prev_cam = result[i - 1].camera_index if i > 0 else None
+        next_cam = result[i + 1].camera_index if i + 1 < len(result) else None
+        hold = prev_cam if (prev_cam is not None and prev_cam != config.camera_all_wide) else next_cam
+        if hold is not None and hold != config.camera_all_wide:
+            result[i] = replace(seg, camera_index=hold, reason="hold_through_pause")
+    return result
+
+
 def _insert_reestablishing_wide(
     segments: list[SakhaCameraSegment],
     config: SakhaAymakhConfig,
 ) -> list[SakhaCameraSegment]:
-    if len(segments) < 2:
+    interval = config.reestablish_all_wide_interval_s
+    dur = config.reestablish_all_wide_duration_s
+    wide = config.camera_all_wide
+    if not segments or interval <= 0 or dur <= 0:
         return segments
 
-    result = [segments[0]]
-    last_all_wide_end = segments[0].end_s if segments[0].camera_index == config.camera_all_wide else 0.0
-    turns_since_wide = 0
-    prev_focus = segments[0].focus_key
-
-    for seg in segments[1:]:
-        if seg.camera_index == config.camera_all_wide:
-            last_all_wide_end = seg.end_s
-            turns_since_wide = 0
-            prev_focus = None
+    # Periodic, time-based re-establishing wide: cut to the общий план every `interval`
+    # seconds of non-wide footage, splitting INSIDE a long shot if needed. A long monologue
+    # is one big close-up segment, so a boundary-only rule never re-established; here we walk
+    # the timeline and drop a short wide whenever the current speaker has been held long
+    # enough since the last wide (the editor's "восьмёрка с общим").
+    result: list[SakhaCameraSegment] = []
+    last_wide_end = segments[0].start_s
+    for seg in segments:
+        if seg.camera_index == wide:
             result.append(seg)
+            last_wide_end = seg.end_s
             continue
-
-        if seg.focus_key and seg.focus_key != prev_focus:
-            turns_since_wide += 1
-        prev_focus = seg.focus_key or prev_focus
-
-        enough_time = seg.start_s - last_all_wide_end >= config.reestablish_all_wide_interval_s
-        enough_turns = turns_since_wide >= config.reestablish_min_turns
-        enough_room = seg.duration_s >= config.reestablish_all_wide_duration_s + config.shot_hold_time_s
-        if enough_time and enough_turns and enough_room:
-            wide_end = seg.start_s + config.reestablish_all_wide_duration_s
-            result.append(
-                _cam_segment(seg.start_s, wide_end, config.camera_all_wide, "reestablish_wide")
-            )
-            result.append(replace(seg, start_s=wide_end))
-            last_all_wide_end = wide_end
-            turns_since_wide = 0
-        else:
-            result.append(seg)
+        s = seg.start_s
+        while True:
+            next_insert = max(s, last_wide_end + interval)
+            if next_insert + dur <= seg.end_s:
+                if next_insert > s + EPS:
+                    result.append(replace(seg, start_s=s, end_s=next_insert))
+                result.append(_cam_segment(next_insert, next_insert + dur, wide, "reestablish_wide"))
+                last_wide_end = next_insert + dur
+                s = next_insert + dur
+            else:
+                if seg.end_s > s + EPS:
+                    result.append(replace(seg, start_s=s, end_s=seg.end_s))
+                break
 
     return result
 

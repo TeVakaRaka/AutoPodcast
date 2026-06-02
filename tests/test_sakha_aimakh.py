@@ -184,7 +184,7 @@ class TestSakhaAymakhPlanner:
         assert plan.speech_segments[0].state == SakhaAymakhState.COHOST_ONLY
         assert plan.camera_segments[0].camera_index == 2
 
-    def test_solo_guest_uses_guest_close_then_pair_cutaway(self):
+    def test_solo_guest_uses_guest_close_then_wide_cutaway(self):
         cfg = _config(guest_cutaway_interval_s=2.0, cutaway_duration_s=0.6)
         plan = _plan(
             {
@@ -197,7 +197,9 @@ class TestSakhaAymakhPlanner:
         )
 
         assert any(seg.camera_index == 1 and seg.reason == "guest_close" for seg in plan.camera_segments)
-        assert any(seg.camera_index == 2 and seg.reason == "guest_pair_cutaway" for seg in plan.camera_segments)
+        # Guest re-establish cuts to the студийный общий (camera_all_wide=3), not the co-host
+        # pair shot — the co-host is usually silent so the pair shot is dead weight.
+        assert any(seg.camera_index == 3 and seg.reason == "guest_wide_cutaway" for seg in plan.camera_segments)
 
     def test_cohost_guest_overlap_uses_pair_wide(self):
         plan = _plan(
