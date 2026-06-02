@@ -32,12 +32,15 @@ STUDIO_OVER_W = 1.0                 # weight on UNEXPLAINED energy (obs > predic
 STUDIO_UNDER_W = 0.25               # weight on missing energy (obs < predicted); softer
 STUDIO_ACTIVE_SNR_DB = 8.0          # a mic must clear floor+this to be a candidate source
 STUDIO_GLOBAL_SILENCE_SNR_DB = 7.0  # below this for every mic -> the frame is silence
-STUDIO_OVERLAP_MIN_SNR_DB = 16.0    # a 2nd source's own mic must carry this much real signal
-STUDIO_OVERLAP_RESIDUAL_DB = 2.0    # ...and exceed the leader's leak prediction by this
+STUDIO_OVERLAP_MIN_SNR_DB = 22.0    # a 2nd source's own mic must carry this much real signal
+STUDIO_OVERLAP_RESIDUAL_DB = 4.0    # ...and exceed the leader's leak prediction by this
+                                    # (tuned to the hand-edited reference: open a 2nd mic only
+                                    # on clear overlap, so a leaky neighbour mic stays closed)
 STUDIO_OVERLAP_SLACK_FRAC = 0.50    # admitting a 2nd source may raise joint error by this frac
 STUDIO_SWITCH_MARGIN = 0.25         # incumbent keeps the frame unless a rival's error is this lower
 STUDIO_MIN_HOLD_S = 0.50            # minimum time before switching away from the owner
-STUDIO_SMOOTH_FILL_S = 0.30         # close membership gaps shorter than this
+STUDIO_SMOOTH_FILL_S = 0.60         # close membership gaps shorter than this (hold a speaker
+                                    # through brief pauses so a turn stays one clean clip)
 STUDIO_SMOOTH_MIN_RUN_S = 0.50      # drop membership runs shorter than this (unless owner)
 STUDIO_XCHECK_CORR = 0.55           # trust waveform residual evidence above this correlation
 STUDIO_XCHECK_BLEED_RESIDUAL_DB = -7.0  # target is bleed of owner if residual <= this
@@ -123,8 +126,30 @@ class SakhaAymakhConfig:
     # Minimum time the open channel is held before a switch is allowed, so
     # sub-second loudness wobble (mutual bleed) cannot chatter the edit.
     calibrated_min_hold_s: float = 0.8
+    # "studio" mode tuning. switch_margin = base reactivity (lower = stickier, driven
+    # by the reaction-sensitivity control); studio_momentum grows the current speaker's
+    # stickiness up to this multiplier after studio_momentum_ramp_s of continuous
+    # talking (so a long monologue is only taken over by something loud/sustained, not a
+    # brief reply); priority_* make a given mic stickier and preferred on close calls.
+    studio_switch_margin: float = 0.25
+    studio_momentum: float = 2.0
+    studio_momentum_ramp_s: float = 8.0
+    studio_priority_main_host: float = 1.0
+    studio_priority_cohost: float = 1.0
+    studio_priority_guest: float = 1.0
 
     def validate(self) -> None:
+        if self.studio_momentum < 1.0:
+            raise ValueError(f"studio_momentum must be >= 1.0, got {self.studio_momentum}")
+        for _sname, _sval in (
+            ("studio_switch_margin", self.studio_switch_margin),
+            ("studio_momentum_ramp_s", self.studio_momentum_ramp_s),
+            ("studio_priority_main_host", self.studio_priority_main_host),
+            ("studio_priority_cohost", self.studio_priority_cohost),
+            ("studio_priority_guest", self.studio_priority_guest),
+        ):
+            if _sval <= 0:
+                raise ValueError(f"{_sname} must be positive, got {_sval}")
         for name, value in [
             ("shot_hold_time_s", self.shot_hold_time_s),
             ("overlap_min_hold_s", self.overlap_min_hold_s),
@@ -329,6 +354,7 @@ def config_from_controls(
         camera_pair_wide=camera_pair_wide,
         camera_all_wide=camera_all_wide,
         dominance_delta_db=_lerp(8.0, 4.0, temp),
+        studio_switch_margin=_lerp(0.42, 0.08, temp),
         shot_hold_time_s=_lerp(1.8, 0.75, intensity),
         silence_timeout_s=_lerp(1.1, 0.55, temp),
         max_solo_hold_s=max_solo_hold_s,
@@ -1383,6 +1409,13 @@ def _build_studio_frame_states(
 
     leak = _studio_estimate_leak_matrix(keys, env, floor_db, n)
     min_hold_frames = max(1, ceil(STUDIO_MIN_HOLD_S / hop_s))
+    momentum_ramp_frames = max(1, round(config.studio_momentum_ramp_s / hop_s))
+    _prio_by_role = {
+        "main_host": config.studio_priority_main_host,
+        "cohost": config.studio_priority_cohost,
+        "guest": config.studio_priority_guest,
+    }
+    priority = {part.key: _prio_by_role.get(part.role, 1.0) for part in participants}
 
     owner_seq: list[str | None] = [None] * n
     overlap_seq: list[set[str]] = [set() for _ in range(n)]
@@ -1422,13 +1455,20 @@ def _build_studio_frame_states(
             e, res = _studio_hypothesis_error(obs, s, keys, leak, floor_db)
             single_err[s] = e
             single_res[s] = res
-        best_src = min(single_err, key=lambda s: single_err[s])
+        # Per-mic priority biases the choice on close calls (higher priority -> preferred).
+        best_src = min(single_err, key=lambda s: single_err[s] / priority.get(s, 1.0))
         best_e = single_err[best_src]
 
         if owner is not None and owner in single_err and owner != best_src:
             held = (idx - owner_since) < min_hold_frames
             owner_e = single_err[owner]
-            margin = STUDIO_SWITCH_MARGIN * max(owner_e, 1.0)
+            # Momentum: the longer the owner has been talking, the harder it is to switch
+            # away (up to studio_momentum x after studio_momentum_ramp_s), so a long
+            # monologue is only taken over by something loud/sustained, not a brief reply.
+            # Per-mic priority makes a given mic stickier too.
+            hold_frac = min(1.0, (idx - owner_since) / momentum_ramp_frames)
+            momentum = 1.0 + (config.studio_momentum - 1.0) * hold_frac
+            margin = config.studio_switch_margin * priority.get(owner, 1.0) * momentum * max(owner_e, 1.0)
             if held or (owner_e - best_e) < margin:
                 best_src = owner
                 best_e = owner_e
@@ -1441,9 +1481,13 @@ def _build_studio_frame_states(
         for s2 in candidates:
             if s2 == best_src:
                 continue
-            if (env[s2][idx] - floor_db[s2]) < STUDIO_OVERLAP_MIN_SNR_DB:
+            # A lower-priority mic needs a stronger case to open as a second voice
+            # (and a higher-priority one needs less) — this is what lets a rarely-
+            # speaking co-host stay closed unless it clearly has its own voice.
+            p2 = priority.get(s2, 1.0)
+            if (env[s2][idx] - floor_db[s2]) < STUDIO_OVERLAP_MIN_SNR_DB / p2:
                 continue
-            if res_leader.get(s2, -120.0) < STUDIO_OVERLAP_RESIDUAL_DB:
+            if res_leader.get(s2, -120.0) < STUDIO_OVERLAP_RESIDUAL_DB / p2:
                 continue
             if _studio_is_waveform_bleed(best_src, s2, waveform_gate, time_s):
                 continue

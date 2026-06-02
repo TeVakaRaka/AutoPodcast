@@ -1371,8 +1371,8 @@ def auto_switch_4cams_cmd(
 @click.option("--audio-track-main-host", default=1, type=int, help="Audio track number for main host mic (1-based)")
 @click.option("--audio-track-cohost", default=2, type=int, help="Audio track number for second host mic (1-based)")
 @click.option("--audio-track-guest", default=3, type=int, help="Audio track number for guest mic (1-based)")
-@click.option("--reaction-sensitivity", default=None, type=float, help="Reaction sensitivity 0..100% (default: 50; lower suppresses leak reactions)")
-@click.option("--temperature", default=None, type=float, help="Legacy alias for --reaction-sensitivity")
+@click.option("--reaction-sensitivity", default=50.0, type=float, help="Reaction sensitivity 0..100% (lower = stickier/suppresses leak reactions)")
+@click.option("--temperature", default=None, type=float, help="Legacy alias / override for --reaction-sensitivity")
 @click.option("--cut-intensity", default=50.0, type=float, help="Cut intensity 0..100%")
 @click.option("--max-solo-hold", default=60.0, type=float, help="Maximum seconds to hold any solo speaker shot")
 @click.option("--dominance-delta-db", default=None, type=float, help="Override dB delta to treat quieter channel as bleed")
@@ -1398,6 +1398,10 @@ def auto_switch_4cams_cmd(
 @click.option("--hold-ms", default=350.0, type=float, help="Hold time after speech in ms")
 @click.option("--audio-pre-roll", default=0.24, type=float, help="Open audio this many seconds before detected onset")
 @click.option("--audio-post-roll", default=0.12, type=float, help="Keep audio open this many seconds after detected end")
+@click.option("--speaker-momentum", default=2.0, type=float, help="studio: how much a long-talking speaker sticks (1.0=off, 2.0=2x harder to interrupt)")
+@click.option("--priority-main-host", default=1.0, type=float, help="studio: mic priority for main host (1.0=neutral, higher=stickier/preferred)")
+@click.option("--priority-cohost", default=1.0, type=float, help="studio: mic priority for cohost (1.0=neutral)")
+@click.option("--priority-guest", default=1.0, type=float, help="studio: mic priority for guest (1.0=neutral)")
 @click.option("--audio-clean-mode", default="studio", type=click.Choice(["studio", "calibrated", "strict", "balanced", "legacy"]), show_default=True, help="SAKHA audio leak cleanup mode")
 @click.option("--motion-check/--no-motion-check", default=False, help="Avoid switching to moving cameras in SAKHA AYMAKH mode")
 @click.option("--motion-hwaccel", default="hybrid", type=click.Choice(["cpu", "hybrid"]), help="Motion analysis acceleration policy")
@@ -1423,6 +1427,7 @@ def auto_switch_sakha_aimakh_cmd(
     detector_backend, vad_threshold, vad_min_speech_ms, vad_min_silence_ms, vad_speech_pad_ms,
     min_speech_duration_ms, release_ms, hold_ms,
     audio_pre_roll, audio_post_roll,
+    speaker_momentum, priority_main_host, priority_cohost, priority_guest,
     audio_clean_mode,
     motion_check, motion_hwaccel, motion_speed, motion_cache, motion_cache_dir, xml_file,
     mute_audio, log, fps,
@@ -1444,9 +1449,7 @@ def auto_switch_sakha_aimakh_cmd(
         if value < 1:
             raise click.BadParameter("Values are 1-based and must be >= 1", param_hint=f"--{label_name}")
     reaction_sensitivity_value = (
-        reaction_sensitivity
-        if reaction_sensitivity is not None
-        else (temperature if temperature is not None else 50.0)
+        temperature if temperature is not None else reaction_sensitivity
     )
     for label_name, value in [
         ("reaction-sensitivity", reaction_sensitivity_value),
@@ -1571,6 +1574,10 @@ def auto_switch_sakha_aimakh_cmd(
         max_solo_hold_s=max_solo_hold,
     )
     overrides = {
+        "studio_momentum": speaker_momentum,
+        "studio_priority_main_host": priority_main_host,
+        "studio_priority_cohost": priority_cohost,
+        "studio_priority_guest": priority_guest,
         "dominance_delta_db": dominance_delta_db,
         "shot_hold_time_s": shot_hold,
         "silence_timeout_s": silence_timeout,
