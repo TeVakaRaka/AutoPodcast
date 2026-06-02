@@ -14,6 +14,34 @@ investigations did *not* lead to code. Newest first. Dates are approximate
 
 ## Decisions
 
+### SAKHA camera: a fragmented host turn no longer swallowed by the guest (`sakha_aimakh.py`)
+**2026-06-02 · `d7da9a5`.** On the real 20.05 Саха recording (studio mode) the camera sat on the
+guest ~1892–1905 s even though the host's mic was open and the host spoke ~1896.5–1901 s — the
+camera had **diverged from the audio plan**. Cause: the host turn is split into sub-`shot_hold`
+fragments (`main_host_only` interleaved with brief `main_host_guest` overlap-wides), and
+`_enforce_min_camera_duration` merged each fragment into its longer guest neighbour. Fix: new
+`_consolidate_choppy_camera_runs` runs *before* the min-duration cleanup. A choppy run (3+ short
+shots, 2+ cameras, ≥1 close camera) is resolved by floor-share: one close camera holding ≥
+`choppy_overlap_dominance` (new config, default 0.70) of the run → ride its close-up; otherwise a
+genuine two-way overlap → ride the studio wide (all_wide), never the cohost pair shot. A sustained
+solo stays one ≥short segment and never enters a run. User's editorial rule: overlap → общак; a
+clearly-led-but-fragmented turn → that close-up; never the средний/pair shot (cohost is silent).
+Verified: host turn now its own close-up, camera matches the audio plan, no sub-0.5 s chatter.
+
+### Auto-resolve mics from the project in every switch mode (`cli.py`, `gui/spec.py`)
+**2026-06-02 · `ef2cd35`.** Only `auto-switch-sakha-aimakh` auto-resolved each speaker's mic from
+the `.prproj`/XML sequence; the other modes forced a manual file pick. Extracted the sakha logic
+into a shared `_resolve_speaker_mics()` and wired it into `auto-multicam` (2 mics),
+`auto-switch-4cams` (4), `auto-switch-monologue` (1): `--mic*` are now optional, resolved from the
+sequence audio tracks (keyed by the existing `--audio-track-*`) when omitted, with a
+duplicate-path guard (two tracks → one file disables muting). `auto-multicam` gained `--xml`. GUI
+mic fields for these modes are no longer required and show "пусто = автопоиск из проекта". Aligned
+`auto-multicam` audio defaults to sakha (speech −24→−27, pre-roll 0.35→0.24, post-roll 0.10→0.12).
+Camera algorithms / leak models deliberately untouched (scope = "auto-audio + defaults"; the
+leak-model port stays in Open work). 488 tests pass (+4 optional-mic tests). Caveat: live
+end-to-end resolve not re-run (T7 drive disconnected mid-session), but `resolve_sequence_audio_sources`
+is the same function the user's prior run used successfully (`method=prproj` in its log).
+
 ### Production code was living outside git
 The repo had only the initial MVP commit; ~14k lines of production code
 (SAKHA AYMAKH, 4cams, monologue, `prproj_patcher`, …) existed only as
@@ -70,6 +98,21 @@ still accepts `--speech-threshold` for the rms backend.
 
 ## Investigations that did NOT lead to code
 
+### Mode audit with grades (2026-06-02, no code change)
+Comparative audit to decide what to harden. Camera planners: `sakha_aimakh` **A** (multi-engine
+de-bleed + every editorial rule), `monologue_2cam` **A−** (predictive motion: delay-until-stable +
+emergency escape), `auto_switch_4cams` **B−** (strong phase/fairness model + top motion guard, but
+speaker detection is bare envelope-dominance and it carries dead `cam3_*` config),
+`camera_scheduler`/`switcher` **C+** (decent 2-speaker rules but **no motion guard** — the only
+planner that can cut to a moving camera). Audio `audio_clean_mode`s (real-audio behaviour):
+`calibrated` **B** (correct normalized attribution, passes the t=364 gate, chatter ≈983), `legacy`
+**C+** (best easy-frame accuracy + lowest wrong-hold, but fails the gate by co-opening the cohost),
+`studio` **C−** (only physically-principled, but raw-dB + momentum cause the host-as-guest-bleed
+long holds — the 1896 s case above), `source_owner` **D** (= what `strict`/`balanced` actually run
+on real audio; `_build_strict_frame_states` only runs in no-audio tests; lowest chatter 52 but
+worst wrong-hold 161 s, fails the gate, starves the cohost to 228 s). No `audio_clean_mode` is fully
+correct — confirms the `experiments/` bake-off premise.
+
 ### "Timeline lags / freezes" is not an autopodcast bug
 Large `.prproj` files lag Premiere, but the cause is project complexity
 (nested sequences, multi-component audio) plus length — not a regression.
@@ -88,6 +131,12 @@ detector change.
 
 ## Open / future work
 
+- Bring weaker modes toward `sakha_aimakh` (2026-06-02 audit): a real de-bleed/source-owner
+  detector for `auto_switch_4cams` (currently bare envelope dominance); a motion guard for the
+  2-speaker `camera_scheduler` path; port momentum, hold-through-brief-silence, max-visible-hold,
+  and the choppy-run consolidator to the other multicam modes; remove the dead `cam3_*` config.
+- Studio audio decision holds the guest mic open while the host talks (the 1896 s
+  host-suppression / t=364-class hot-guest-bleed bug) — the `experiments/` bake-off.
 - Full `.prproj` size fix: volume keyframes instead of physical audio cuts.
 - Validate cross-cancel on a real bleed-prone episode (only synthetic
   tested so far).

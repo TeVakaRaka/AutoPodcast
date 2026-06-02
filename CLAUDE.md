@@ -88,3 +88,8 @@ Actions — see [docs/build-and-ci.md](docs/build-and-ci.md).
 - [docs/build-and-ci.md](docs/build-and-ci.md) — PyInstaller build + GitHub Actions
 - [docs/algorithm.md](docs/algorithm.md) — base RMS/hysteresis pipeline
 - [docs/auto-switching-spec-4cams.md](docs/auto-switching-spec-4cams.md) — canonical 4-cam spec
+
+**Keep the log current.** Whenever you change code, append an entry to
+[docs/decisions.md](docs/decisions.md) (newest first): what changed, where (file/function),
+why, how it was verified, and the commit SHA. This log is the project's memory across
+sessions — updating it is part of "done", not optional.
