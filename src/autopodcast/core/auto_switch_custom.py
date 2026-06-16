@@ -23,6 +23,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from autopodcast.core.auto_switch_4cams import AudioLevelSegment, build_audio_plan
+from autopodcast.core.sakha_aimakh import (
+    SakhaAymakhConfig,
+    SakhaParticipantSpec,
+    _build_studio_frame_states,
+    _build_waveform_gate_context,
+)
 from autopodcast.models.domain import SpeakerActivity
 
 
@@ -50,6 +56,10 @@ class CustomSwitchConfig:
     shot_hold_s: float = 1.4             # minimum camera duration; bridges brief pauses/overlaps
     reestablish_interval_s: float = 0.0  # 0 = off; else cut to wide after this long on one camera
     reestablish_hold_s: float = 1.5      # duration of an inserted re-establishing wide
+    # "off" = loudness-dominance filter; "studio" = sakha's leak-matrix unmixing
+    # (bleed is explained away so a mic that is only loud from a neighbour's leak
+    # does not falsely open). The CLI/GUI default to "studio".
+    clean_mode: str = "off"
 
     # --- audio plan (names/defaults match Roundtable4CamConfig) ---
     audio_silence_opens_all_tracks: bool = True
@@ -82,6 +92,8 @@ class CustomSwitchConfig:
             raise ValueError(f"reestablish_interval_s must be >= 0, got {self.reestablish_interval_s}")
         if self.wide_camera < 0:
             raise ValueError(f"wide_camera must be >= 0, got {self.wide_camera}")
+        if self.clean_mode not in {"off", "studio"}:
+            raise ValueError(f"clean_mode must be 'off' or 'studio', got {self.clean_mode}")
 
 
 @dataclass(frozen=True)
@@ -118,12 +130,21 @@ def build_custom_plan(
     activities: dict[str, SpeakerActivity],
     hop_s: float,
     config: CustomSwitchConfig,
+    audio_by_key: dict[str, object] | None = None,
+    audio_sample_rate: int | None = None,
 ) -> CustomPlan:
-    """Build a full custom switching plan from per-person speech activities."""
+    """Build a full custom switching plan from per-person speech activities.
+
+    ``audio_by_key`` / ``audio_sample_rate`` are only used by ``clean_mode ==
+    "studio"`` for the optional waveform cross-check; the leak-matrix unmixing
+    itself works from the envelope activities alone.
+    """
     config.validate()
     _validate_people(people)
 
-    frame_states = build_frame_states(people, activities, hop_s, config)
+    frame_states = build_frame_states(
+        people, activities, hop_s, config, audio_by_key, audio_sample_rate
+    )
     camera_segments = build_camera_segments(frame_states, hop_s, config)
 
     # The audio plan is role-agnostic: it only reads frame.active_keys / time_s
@@ -158,8 +179,15 @@ def build_frame_states(
     activities: dict[str, SpeakerActivity],
     hop_s: float,
     config: CustomSwitchConfig,
+    audio_by_key: dict[str, object] | None = None,
+    audio_sample_rate: int | None = None,
 ) -> list[CustomFrameState]:
-    """Per-frame active set (dominance-filtered) -> resolved camera index."""
+    """Per-frame active set -> resolved camera index.
+
+    With ``clean_mode == "studio"`` the active set comes from sakha's well-tuned
+    leak-matrix unmixing (bleed explained away); otherwise from a simple
+    loudness-dominance filter.
+    """
     if not people:
         return []
 
@@ -168,8 +196,14 @@ def build_frame_states(
         return []
 
     camera_by_key = {p.key: p.camera_angle for p in people}
-    base_key = people[0].key
 
+    if config.clean_mode == "studio":
+        return _studio_frame_states(
+            people, activities, hop_s, config, camera_by_key,
+            audio_by_key, audio_sample_rate,
+        )
+
+    base_key = people[0].key
     states: list[CustomFrameState] = []
     for idx in range(frame_count):
         active_keys = _active_keys_for_frame(people, activities, idx, config)
@@ -182,6 +216,49 @@ def build_frame_states(
             )
         )
     return states
+
+
+def _studio_frame_states(
+    people: list[CustomPerson],
+    activities: dict[str, SpeakerActivity],
+    hop_s: float,
+    config: CustomSwitchConfig,
+    camera_by_key: dict[str, int],
+    audio_by_key: dict[str, object] | None,
+    audio_sample_rate: int | None,
+) -> list[CustomFrameState]:
+    """Active set via sakha's studio leak-matrix unmixing, mapped to cameras.
+
+    Reuses the tuned sakha builder by presenting each person as a *unique-role*
+    participant, so per-role priorities stay neutral. Only the per-frame
+    ``active_keys`` are used; sakha's role-based state/focus are ignored.
+    """
+    specs = [
+        SakhaParticipantSpec(
+            key=p.key, label=p.label, role=p.key, audio_track_index=p.audio_track_index
+        )
+        for p in people
+    ]
+    sakha_cfg = SakhaAymakhConfig(
+        camera_main_host_close=1, camera_guest_close=1,
+        camera_pair_wide=1, camera_all_wide=1,
+        dominance_delta_db=config.dominance_delta_db,
+        audio_clean_mode="studio",
+    )
+    gate = (
+        _build_waveform_gate_context(audio_by_key, audio_sample_rate, sakha_cfg)
+        if audio_by_key and audio_sample_rate
+        else None
+    )
+    sakha_states = _build_studio_frame_states(specs, activities, sakha_cfg, hop_s, None, gate)
+    return [
+        CustomFrameState(
+            time_s=s.time_s,
+            active_keys=tuple(s.active_keys),
+            camera_index=_camera_for_active(list(s.active_keys), camera_by_key, config.wide_camera),
+        )
+        for s in sakha_states
+    ]
 
 
 def build_camera_segments(

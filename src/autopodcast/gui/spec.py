@@ -403,6 +403,11 @@ _CUSTOM = ModeSpec(
               advanced=True, flag_pair=("--mute-audio", "--no-mute-audio")),
         Field("--cross-cancel", "Подавлять утечку микрофонов", "bool", default=False,
               advanced=True, flag_pair=("--cross-cancel", "--no-cross-cancel")),
+        Field("--audio-clean-mode", "Режим очистки утечек", "choice", default="studio",
+              advanced=True, choices=("studio", "off"),
+              hint="studio → распутывает утечку между микрофонами (модель утечки, как в SAKHA) "
+                   "и держит того, чей голос реально звучит — рекомендуется.\n"
+                   "off → простое сравнение по громкости."),
         Field("--vad-threshold", "Строгость детектора речи (VAD)", "float", default=0.65,
               advanced=True, vmin=0.3, vmax=0.9, vstep=0.05,
               hint="выше — только чёткая речь; ниже — ловит тихие реплики"),

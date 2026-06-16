@@ -1480,6 +1480,7 @@ def _parse_person_spec(spec_str: str) -> tuple[str, int, int]:
 @click.option("--shot-hold", default=1.4, type=float, help="Minimum steady shot duration in seconds")
 @click.option("--reestablish-interval", default=0.0, type=float, help="Cut to wide after this many seconds on one close shot (0 = off)")
 @click.option("--reestablish-hold", default=1.5, type=float, help="Duration of each re-establishing wide shot")
+@click.option("--audio-clean-mode", default="studio", type=click.Choice(["off", "studio"]), help="Mic-leak handling: 'studio' = sakha leak-matrix unmixing (recommended), 'off' = loudness only")
 @click.option("--audio-pre-roll", default=0.24, type=float, help="Open audio this many seconds before detected onset")
 @click.option("--audio-post-roll", default=0.12, type=float, help="Keep audio open this many seconds after detected end")
 @click.option("--mute-audio/--no-mute-audio", default=True, help="Mute inactive speaker mics")
@@ -1493,6 +1494,7 @@ def auto_switch_custom_cmd(
     detector_backend, vad_threshold, vad_min_speech_ms, vad_min_silence_ms, vad_speech_pad_ms,
     min_speech_duration_ms, release_ms, hold_ms, dominance_delta_db,
     shot_hold, reestablish_interval, reestablish_hold,
+    audio_clean_mode,
     audio_pre_roll, audio_post_roll,
     mute_audio, log, fps,
     enable_cross_cancel, cross_cancel_fir_taps,
@@ -1582,6 +1584,7 @@ def auto_switch_custom_cmd(
         shot_hold_s=shot_hold,
         reestablish_interval_s=reestablish_interval,
         reestablish_hold_s=reestablish_hold,
+        clean_mode=audio_clean_mode,
         audio_pre_roll_s=audio_pre_roll,
         audio_post_roll_s=audio_post_roll,
         audio_recent_hold_s=hold_ms / 1000.0,
@@ -1640,7 +1643,11 @@ def auto_switch_custom_cmd(
         )
 
     hop_s = analysis_config.hop_ms / 1000.0
-    plan = build_custom_plan(people, activities, hop_s, custom_config)
+    audio_by_key = {person.key: audio_arrays[idx] for idx, person in enumerate(people)}
+    plan = build_custom_plan(
+        people, activities, hop_s, custom_config,
+        audio_by_key=audio_by_key, audio_sample_rate=analysis_config.sample_rate,
+    )
     click.echo(f"Planning complete: {len(plan.camera_segments)} camera segments")
 
     first_angle, cuts = segments_to_cuts(plan.camera_segments)

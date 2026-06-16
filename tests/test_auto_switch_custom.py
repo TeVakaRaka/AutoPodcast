@@ -188,3 +188,69 @@ class TestValidation:
         }
         with pytest.raises(ValueError):
             build_custom_plan(people, activities, HOP_S, _config())
+
+
+class TestStudioCleanMode:
+    """The 'studio' leak-matrix attribution (reused from sakha) wired into custom.
+
+    Asserts correct attribution on clean cases; the bleed-suppression advantage
+    over plain loudness is a production property that depends on the studio
+    internals and is not asserted with a tiny synthetic.
+    """
+
+    def test_monologue_attributed_to_speaker(self):
+        # total > active run so the per-mic floor sees real silence (as in any
+        # real recording); otherwise the studio SNR floor has nothing to anchor to.
+        people = _people()
+        activities = {
+            "host": _activity("host", [(0.0, 4.0)], 5.0),
+            "g1": _activity("g1", [], 5.0),
+            "g2": _activity("g2", [], 5.0),
+            "g3": _activity("g3", [], 5.0),
+        }
+        plan = build_custom_plan(people, activities, HOP_S, _config(clean_mode="studio"))
+        cams = {c for c, _s, _e in _summary(plan)}
+        # the host's camera is shown, and no other person's camera is falsely opened
+        assert 2 in cams
+        assert 3 not in cams and 4 not in cams
+
+    def test_clean_alternation_attributes_each_speaker(self):
+        people = _people()
+        activities = {
+            "host": _activity("host", [(0.0, 3.0)], 9.0),
+            "g3": _activity("g3", [(3.0, 6.0)], 9.0),
+            "g1": _activity("g1", [(6.0, 9.0)], 9.0),
+            "g2": _activity("g2", [], 9.0),
+        }
+        plan = build_custom_plan(people, activities, HOP_S, _config(clean_mode="studio"))
+        cams = [c for c, _s, _e in _summary(plan)]
+        assert cams == [2, 4, 3]  # host -> cam2, guest3 -> cam4, guest1 -> cam3
+
+    def test_genuine_cross_camera_overlap_goes_wide(self):
+        people = _people()
+        activities = {
+            "host": _activity("host", [(0.0, 4.0)], 4.0),
+            "g3": _activity("g3", [(0.0, 4.0)], 4.0),  # host (cam2) + guest3 (cam4), both real
+            "g1": _activity("g1", [], 4.0),
+            "g2": _activity("g2", [], 4.0),
+        }
+        plan = build_custom_plan(people, activities, HOP_S, _config(clean_mode="studio"))
+        cams = {c for c, _s, _e in _summary(plan)}
+        assert 1 in cams  # the wide / общак appears for the genuine overlap
+
+    def test_studio_emits_audio_plan(self):
+        people = _people()
+        activities = {
+            "host": _activity("host", [(0.0, 4.0)], 4.0),
+            "g1": _activity("g1", [], 4.0),
+            "g2": _activity("g2", [], 4.0),
+            "g3": _activity("g3", [], 4.0),
+        }
+        plan = build_custom_plan(people, activities, HOP_S, _config(clean_mode="studio"))
+        assert set(plan.audio_open_intervals_s.keys()) == {0, 1, 2, 3}
+
+    def test_invalid_clean_mode_raises(self):
+        people = _people()
+        activities = {p.key: _activity(p.key, [], 2.0) for p in people}
+        with pytest.raises(ValueError, match="clean_mode"):
+            build_custom_plan(people, activities, HOP_S, _config(clean_mode="bogus"))

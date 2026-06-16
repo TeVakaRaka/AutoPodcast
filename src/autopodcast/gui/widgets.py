@@ -168,7 +168,7 @@ class DynamicRowsField(ctk.CTkFrame):
     buttons. ``get`` returns a list of dicts keyed by each column's ``key``.
     """
 
-    def __init__(self, master, columns, add_label="➕ Добавить", initial_rows=1):
+    def __init__(self, master, columns, add_label="➕ Добавить", initial_rows=1, initial=None):
         super().__init__(master, fg_color="transparent")
         self._columns = list(columns)
         self._rows: list[tuple[ctk.CTkFrame, dict]] = []
@@ -190,17 +190,40 @@ class DynamicRowsField(ctk.CTkFrame):
             row=2, column=0, sticky="w", pady=(6, 0)
         )
 
-        for _ in range(max(0, initial_rows)):
-            self.add_row()
+        if initial:
+            for row_values in initial:
+                self.add_row(row_values)
+        else:
+            for _ in range(max(0, initial_rows)):
+                self.add_row()
+
+    def _next_int(self, key: str) -> int:
+        """Largest existing integer in column ``key`` + 1 (auto-fill on add)."""
+        largest = 0
+        for _rf, getters in self._rows:
+            getter = getters.get(key)
+            if getter is None:
+                continue
+            try:
+                largest = max(largest, int(str(getter())))
+            except (ValueError, TypeError):
+                pass
+        return largest + 1
 
     def add_row(self, values: dict | None = None) -> None:
+        auto = values is None  # ➕ button -> auto-fill integer columns
         values = values or {}
         row_frame = ctk.CTkFrame(self._body, fg_color="transparent")
         row_frame.grid(row=len(self._rows), column=0, sticky="ew", pady=2)
         getters: dict = {}
         for ci, col in enumerate(self._columns):
             row_frame.grid_columnconfigure(ci, weight=1)
-            default = values.get(col.key, col.default)
+            if col.key in values:
+                default = values[col.key]
+            elif auto and col.kind == "int":
+                default = self._next_int(col.key)
+            else:
+                default = col.default
             if col.kind == "bool":
                 var = ctk.BooleanVar(value=bool(default))
                 ctk.CTkCheckBox(row_frame, text="", variable=var).grid(
@@ -237,8 +260,14 @@ class DynamicRowsField(ctk.CTkFrame):
 def make_field_widget(master, fld: Field) -> tuple[ctk.CTkBaseClass, Callable[[], object]]:
     """Create the input widget for a Field and return (widget, getter)."""
     if fld.kind == "rows":
-        initial = 2 if fld.arg == "--camera" else 1
-        w = DynamicRowsField(master, columns=fld.columns, initial_rows=initial)
+        if fld.arg == "--camera":
+            # sensible default: camera 1 is the wide/общак, plus a second camera
+            w = DynamicRowsField(
+                master, columns=fld.columns,
+                initial=[{"angle": 1, "wide": True}, {"angle": 2}],
+            )
+        else:  # --person
+            w = DynamicRowsField(master, columns=fld.columns, initial_rows=1)
         return w, w.get
 
     if fld.kind == "file":

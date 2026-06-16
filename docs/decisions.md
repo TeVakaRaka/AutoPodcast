@@ -14,6 +14,25 @@ investigations did *not* lead to code. Newest first. Dates are approximate
 
 ## Decisions
 
+### Конструктор: studio leak-suppression + macOS GUI build & synthetic e2e (`auto_switch_custom.py`, `cli.py`, `gui/*`)
+**2026-06-16 · branch `claude/awesome-pike-256a34`.** Follow-up to the entry below. (1) Wired SAKHA's
+well-tuned **studio leak-matrix** attribution into the custom planner instead of only the plain
+loudness filter: each person is presented to `_build_studio_frame_states` as a *unique-role*
+participant so per-role priorities stay neutral; only per-frame `active_keys` are consumed (sakha's
+role-based state/focus ignored). New `clean_mode` (planner default `off` to keep unit tests stable;
+CLI/GUI default `studio`) + `--audio-clean-mode off|studio`. The leak-matrix works from envelopes;
+when raw audio is passed, the optional waveform "leak-louder-than-direct" cross-check is built too.
+(2) **Built & ran on this Mac**: `brew install python-tk@3.10` makes the venv's Python import Tk, so
+the customtkinter GUI now constructs here — added a Tk-guarded `test_gui_app_smoke.py` (skips without
+Tk/display; on Windows CI it actually exercises the window) verifying every mode form builds and the
+default Конструктор form yields a valid command. (3) **Synthetic e2e** `test_custom_e2e.py`: a
+synthetic `.prproj` + synthetic WAVs through the real CLI (load→analyze→detect→plan→`patch_prproj`)
+for both leak modes, using explicit `--mic` to bypass project audio resolution. (4) GUI polish: the
+camera table defaults camera 1 to «общак» and auto-increments angle/track on ➕. Note: a tiny 2-mic
+synthetic does not cleanly show studio beating loudness (in 2 mics a bleed within ~6 dB looks like
+real signal to both); studio's win is a production property (3+ mics, calibration, momentum), so the
+unit tests assert correct attribution on clean cases rather than a contrived bleed case.
+
 ### "Конструктор" — a configurable N-people / M-cameras mode (`auto_switch_custom.py`, `cli.py`, `gui/*`)
 **2026-06-16 · branch `claude/awesome-pike-256a34` (off `claude/release-build`).** The presets
 hard-code the cast (1+3, 2+1, …); the user wanted a *сборная* version where you set how many

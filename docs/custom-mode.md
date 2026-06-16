@@ -82,12 +82,23 @@ auto-resolved from the project by audio track (as in every mode); pass `--mic`
 once per person, in order, to override. Output is the patched `.prproj` plus a
 `.log.jsonl`.
 
-## Audio
+## Audio & mic-leak handling
+
+`--audio-clean-mode` (default **`studio`**) decides who is really speaking when
+mics hear each other. `studio` reuses SAKHA's well-tuned **leak-matrix
+unmixing**: it models each mic as its own speaker plus an attenuated copy of the
+others, so a mic that is only loud because it is catching a neighbour's bleed is
+*not* opened — the true speaker is held through a monologue instead of the edit
+thrashing between mics. `off` falls back to a plain loudness-dominance filter.
+(Implementation note: the studio builder is reused from `sakha_aimakh` by
+presenting each person as a unique-role participant, so its per-role priorities
+stay neutral.)
 
 When `--mute-audio` is on (default), each person's mic track is opened only
 while they speak (with pre/post-roll and the same stabilization the presets
 use, via the shared `build_audio_plan`) and muted otherwise. During silence all
-tracks stay open. `--cross-cancel` subtracts inter-mic bleed before detection.
+tracks stay open. `--cross-cancel` additionally subtracts inter-mic bleed
+before detection.
 
 ## Limitations / notes
 
