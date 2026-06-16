@@ -20,6 +20,16 @@ FILE_XML = "xml"
 
 
 @dataclass(frozen=True)
+class Column:
+    """One column of a dynamic-rows field (the custom mode people/cameras tables)."""
+
+    key: str                       # value key returned per row
+    kind: str                      # str | int | bool
+    header: str                    # column header label
+    default: object = None
+
+
+@dataclass(frozen=True)
 class Field:
     """One form field, bound to a CLI option."""
 
@@ -40,6 +50,8 @@ class Field:
     vmax: float | None = None
     vstep: float = 1.0
     unit: str = ""
+    # for kind == "rows": the per-row columns (custom mode people/cameras tables)
+    columns: tuple = ()
 
     @property
     def is_slider(self) -> bool:
@@ -78,44 +90,109 @@ def _equals_default(f: Field, text: str) -> bool:
     return text == str(f.default)
 
 
+def _emit_simple_field(f: Field, raw: object) -> list[str]:
+    """argv tokens for a non-rows field (``[]`` when it should be omitted)."""
+    if f.kind == "bool":
+        val = bool(raw)
+        if val != f.default:
+            if not f.flag_pair:
+                raise ValueError(f"bool field {f.arg} has no flag_pair")
+            return [f.flag_pair[0] if val else f.flag_pair[1]]
+        return []
+
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        if f.required:
+            raise ValueError(f"Не заполнено обязательное поле: {f.label}")
+        return []
+    if f.required or not _equals_default(f, text):
+        return [f.arg, text]
+    return []
+
+
+def _out_args(in_path: str, spec: ModeSpec) -> list[str]:
+    p = Path(in_path)
+    return ["--out", str(p.with_name(p.stem + spec.out_suffix + p.suffix))]
+
+
 def build_argv(spec: ModeSpec, values: dict) -> list[str]:
     """Turn filled-in form values into a CLI argument list.
 
     - required fields are always emitted (raises ValueError if empty);
     - optional fields are emitted only when non-empty and changed from default;
     - bool fields emit the flag opposite to their default when toggled;
+    - the "Конструктор" mode expands its people/cameras tables into repeated
+      ``--person`` flags plus a single ``--wide-camera``;
     - ``--out`` is auto-derived from ``--in`` + ``spec.out_suffix``.
     """
+    if spec.key == "custom":
+        return _build_custom_argv(spec, values)
+
     argv: list[str] = [spec.cmd]
     in_path: str | None = None
+    for f in spec.fields:
+        raw = values.get(f.arg)
+        if f.arg == "--in":
+            in_path = "" if raw is None else str(raw).strip()
+        argv += _emit_simple_field(f, raw)
+
+    if in_path:
+        argv += _out_args(in_path, spec)
+    return argv
+
+
+def _build_custom_argv(spec: ModeSpec, values: dict) -> list[str]:
+    """Expand the custom mode form (incl. people/cameras tables) into argv."""
+    argv: list[str] = [spec.cmd]
+    in_path: str | None = None
+    people_rows: list = []
+    camera_rows: list = []
 
     for f in spec.fields:
         raw = values.get(f.arg)
-
-        if f.kind == "bool":
-            val = bool(raw)
-            if val != f.default:
-                if not f.flag_pair:
-                    raise ValueError(f"bool field {f.arg} has no flag_pair")
-                argv.append(f.flag_pair[0] if val else f.flag_pair[1])
+        if f.kind == "rows":
+            rows = list(raw) if raw else []
+            if f.arg == "--person":
+                people_rows = rows
+            elif f.arg == "--camera":
+                camera_rows = rows
             continue
-
-        text = "" if raw is None else str(raw).strip()
         if f.arg == "--in":
-            in_path = text
+            in_path = "" if raw is None else str(raw).strip()
+        argv += _emit_simple_field(f, raw)
 
-        if not text:
-            if f.required:
-                raise ValueError(f"Не заполнено обязательное поле: {f.label}")
+    # cameras table -> the set of declared angles + the single wide angle
+    declared_angles: set[str] = set()
+    wide_angles: list[str] = []
+    for row in camera_rows:
+        angle = str(row.get("angle", "")).strip()
+        if not angle:
             continue
+        declared_angles.add(angle)
+        if row.get("wide"):
+            wide_angles.append(angle)
+    if len(wide_angles) != 1:
+        raise ValueError("Отметьте ровно одну камеру как «общак».")
 
-        if f.required or not _equals_default(f, text):
-            argv += [f.arg, text]
+    # people table -> one --person flag each
+    if not people_rows:
+        raise ValueError("Добавьте хотя бы одного человека.")
+    for row in people_rows:
+        label = str(row.get("label", "")).strip()
+        track = str(row.get("track", "")).strip()
+        camera = str(row.get("camera", "")).strip()
+        if not (label and track and camera):
+            raise ValueError("Для каждого человека заполните имя, аудиодорожку и камеру.")
+        if ":" in label:
+            raise ValueError(f"Имя не должно содержать символ ':' — «{label}».")
+        if declared_angles and camera not in declared_angles:
+            raise ValueError(f"Камера {camera} для «{label}» не объявлена в списке камер.")
+        argv += ["--person", f"{label}:{track}:{camera}"]
+
+    argv += ["--wide-camera", wide_angles[0]]
 
     if in_path:
-        p = Path(in_path)
-        argv += ["--out", str(p.with_name(p.stem + spec.out_suffix + p.suffix))]
-
+        argv += _out_args(in_path, spec)
     return argv
 
 
@@ -285,7 +362,54 @@ _MONOLOGUE = ModeSpec(
     ],
 )
 
-MODES: list[ModeSpec] = [_MULTICAM, _4CAMS, _SAKHA, _MONOLOGUE]
+_CUSTOM = ModeSpec(
+    cmd="auto-switch-custom",
+    key="custom",
+    title="Конструктор",
+    out_suffix="_custom",
+    fields=[
+        Field("--in", "Файл проекта .prproj", "file", required=True, file_filter=FILE_PRPROJ),
+        Field("--seq", "Имя секвенции", "str", required=True),
+        Field("--xml", "FCP7 XML (необязательно)", "file", file_filter=FILE_XML,
+              hint="помогает найти источники аудио"),
+        Field(
+            "--camera", "Камеры", "rows",
+            columns=(
+                Column("angle", "int", "Angle", 1),
+                Column("label", "str", "Название", ""),
+                Column("wide", "bool", "Общак", False),
+            ),
+            hint="Перечислите камеры мультикам-секвенции по их номеру (angle) и "
+                 "отметьте ОДНУ как «общак» — общий план для пересечений и тишины.",
+        ),
+        Field(
+            "--person", "Люди", "rows",
+            columns=(
+                Column("label", "str", "Имя", ""),
+                Column("track", "int", "Аудиодорожка", 1),
+                Column("camera", "int", "Камера (angle)", 1),
+            ),
+            hint="Для каждого человека: имя, номер его аудиодорожки в проекте и номер "
+                 "камеры (angle), которая его показывает. Двое на одной камере = общий "
+                 "план пары (как гости 1+2).",
+        ),
+        Field("--shot-hold", "Мин. длина кадра", "float", default=1.4,
+              advanced=True, vmin=0.5, vmax=5.0, vstep=0.1, unit="с"),
+        Field("--reestablish-interval", "Возврат на общак каждые", "float", default=0.0,
+              advanced=True, vmin=0.0, vmax=120.0, vstep=5.0, unit="с",
+              hint="0 = не возвращаться принудительно. Иначе после стольких секунд на "
+                   "одном крупном плане врезается общий план."),
+        Field("--mute-audio", "Глушить неактивные микрофоны", "bool", default=True,
+              advanced=True, flag_pair=("--mute-audio", "--no-mute-audio")),
+        Field("--cross-cancel", "Подавлять утечку микрофонов", "bool", default=False,
+              advanced=True, flag_pair=("--cross-cancel", "--no-cross-cancel")),
+        Field("--vad-threshold", "Строгость детектора речи (VAD)", "float", default=0.65,
+              advanced=True, vmin=0.3, vmax=0.9, vstep=0.05,
+              hint="выше — только чёткая речь; ниже — ловит тихие реплики"),
+    ],
+)
+
+MODES: list[ModeSpec] = [_MULTICAM, _4CAMS, _SAKHA, _MONOLOGUE, _CUSTOM]
 
 
 def mode_by_key(key: str) -> ModeSpec:

@@ -1,8 +1,9 @@
 # GUI
 
-`src/autopodcast/gui/` is a customtkinter desktop window covering all four
-editing modes. It is a thin front end: it builds an `autopodcast` CLI
-command from form values and runs it as a child process.
+`src/autopodcast/gui/` is a customtkinter desktop window covering all five
+editing modes (four presets + the "Конструктор" configurable mode). It is a
+thin front end: it builds an `autopodcast` CLI command from form values and
+runs it as a child process.
 
 ## How it launches
 
@@ -34,7 +35,7 @@ control is a `Field`:
 |---|---|
 | `arg` | CLI flag, e.g. `--mic-a` |
 | `label` | Russian label shown in the form |
-| `kind` | `file` / `int` / `float` / `str` / `bool` / `choice` |
+| `kind` | `file` / `int` / `float` / `str` / `bool` / `choice` / `rows` |
 | `default` | must match the matching `@click.option` default in `cli.py` |
 | `required` | always emitted; empty value raises a validation error |
 | `advanced` | shown inside the collapsible "Дополнительно" section |
@@ -61,6 +62,21 @@ thresholds) are sliders with a live value readout, created by giving the
 
 `tests/test_gui_spec.py::TestSpecMatchesCli` fails if a field's `arg` is not
 a real CLI option or its `default` drifts from the CLI default.
+
+## Dynamic tables — the "Конструктор" mode
+
+The configurable mode needs a *variable* number of people and cameras, which
+the static `Field` list cannot express. A `Field(kind="rows", columns=(...))`
+renders a `DynamicRowsField` (`widgets.py`): an add/remove table where each
+`Column(key, kind, header, default)` is one cell. Its getter returns a
+`list[dict]` (one dict per row).
+
+`build_argv` special-cases `spec.key == "custom"` (`_build_custom_argv`): the
+**Люди** table expands to repeated `--person "label:track:camera"` and the
+**Камеры** table yields the single `--wide-camera` (the row ticked "Общак").
+These two `arg`s (`--person`, `--camera`) are virtual — `--camera` is not a CLI
+option, so `TestSpecMatchesCli` skips `kind == "rows"` fields. See
+[custom-mode.md](custom-mode.md).
 
 ## How to add a mode
 

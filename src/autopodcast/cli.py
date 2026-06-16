@@ -22,6 +22,11 @@ from autopodcast.core.auto_switch_4cams import (
     Roundtable4CamConfig,
     build_roundtable_plan,
 )
+from autopodcast.core.auto_switch_custom import (
+    CustomPerson,
+    CustomSwitchConfig,
+    build_custom_plan,
+)
 from autopodcast.core.camera_motion import (
     CameraMotionAnalyzer,
     CameraMotionConfig,
@@ -1409,6 +1414,269 @@ def auto_switch_4cams_cmd(
         audio_overlap_s=0.0,
         audio_pre_roll_s=roundtable_config.audio_pre_roll_s,
         audio_post_roll_s=roundtable_config.audio_post_roll_s,
+        prelude_log_entries=log_entries if log else None,
+        fps=fps,
+    )
+    click.echo(f"Done: {out_file}")
+    if log_path and log_path.exists():
+        click.echo(f"Log: {log_path}")
+
+
+def _parse_person_spec(spec_str: str) -> tuple[str, int, int]:
+    """Parse a --person 'label:audio_track:camera_angle' value (1-based ints)."""
+    parts = spec_str.split(":")
+    if len(parts) != 3:
+        raise click.BadParameter(
+            f"Expected 'label:audio_track:camera_angle', got '{spec_str}'",
+            param_hint="--person",
+        )
+    label = parts[0].strip()
+    if not label:
+        raise click.BadParameter("Person label must not be empty", param_hint="--person")
+    try:
+        audio_track = int(parts[1])
+        camera_angle = int(parts[2])
+    except ValueError:
+        raise click.BadParameter(
+            f"audio_track and camera_angle must be integers, got '{spec_str}'",
+            param_hint="--person",
+        )
+    if audio_track < 1 or camera_angle < 1:
+        raise click.BadParameter(
+            "audio_track and camera_angle are 1-based and must be >= 1",
+            param_hint="--person",
+        )
+    return label, audio_track, camera_angle
+
+
+@cli.command("auto-switch-custom")
+@click.option("--in", "in_file", required=True, type=click.Path(exists=True), help="Input .prproj file")
+@click.option("--seq", required=True, help="Sequence name in .prproj")
+@click.option("--out", "out_file", required=True, type=click.Path(), help="Output .prproj file")
+@click.option(
+    "--person", "person_specs", multiple=True, required=True,
+    help="Repeatable. 'label:audio_track:camera_angle' (1-based audio track & camera angle). "
+         "People who share a camera_angle share that shot (e.g. two guests on one medium). "
+         "Do not use ':' inside the label.",
+)
+@click.option("--wide-camera", required=True, type=int, help="Premiere angle of the wide (obshchak) shot (1-based)")
+@click.option(
+    "--mic", "mic_files", multiple=True, type=click.Path(exists=True),
+    help="Optional explicit mic file per person, in --person order. Omit to auto-resolve from the project.",
+)
+@click.option("--xml", "xml_file", type=click.Path(exists=True), help="Premiere FCP7 XML for reliable audio source resolution")
+@click.option("--speech-threshold", default=-27.0, type=float, help="Speech onset threshold in dBFS")
+@click.option("--release-threshold", default=-31.0, type=float, help="Speech release threshold in dBFS")
+@click.option("--input-gain", default=0.0, type=float, help="Input gain in dB for all mics")
+@click.option("--detector-backend", default="auto", type=click.Choice(["auto", "rms", "silero"]), help="Speech detector backend")
+@click.option("--vad-threshold", default=0.65, type=float, help="Silero VAD speech probability threshold")
+@click.option("--vad-min-speech-ms", default=120.0, type=float, help="Silero VAD minimum speech duration in ms")
+@click.option("--vad-min-silence-ms", default=80.0, type=float, help="Silero VAD minimum silence duration in ms")
+@click.option("--vad-speech-pad-ms", default=30.0, type=float, help="Silero VAD padding around detected speech in ms")
+@click.option("--min-speech-duration-ms", default=120.0, type=float, help="Minimum stable speech duration in ms")
+@click.option("--release-ms", default=220.0, type=float, help="Speech release debounce in ms")
+@click.option("--hold-ms", default=350.0, type=float, help="Hold time after speech in ms")
+@click.option("--dominance-delta-db", default=6.0, type=float, help="dB delta to treat a quieter channel as bleed")
+@click.option("--shot-hold", default=1.4, type=float, help="Minimum steady shot duration in seconds")
+@click.option("--reestablish-interval", default=0.0, type=float, help="Cut to wide after this many seconds on one close shot (0 = off)")
+@click.option("--reestablish-hold", default=1.5, type=float, help="Duration of each re-establishing wide shot")
+@click.option("--audio-pre-roll", default=0.24, type=float, help="Open audio this many seconds before detected onset")
+@click.option("--audio-post-roll", default=0.12, type=float, help="Keep audio open this many seconds after detected end")
+@click.option("--mute-audio/--no-mute-audio", default=True, help="Mute inactive speaker mics")
+@click.option("--log/--no-log", default=True, help="Write JSONL log file next to output")
+@click.option("--fps", default=0.0, type=float, help="Sequence frame rate for frame-aligned cuts (0 = auto-detect)")
+@_cross_cancel_options()
+def auto_switch_custom_cmd(
+    in_file, seq, out_file,
+    person_specs, wide_camera, mic_files, xml_file,
+    speech_threshold, release_threshold, input_gain,
+    detector_backend, vad_threshold, vad_min_speech_ms, vad_min_silence_ms, vad_speech_pad_ms,
+    min_speech_duration_ms, release_ms, hold_ms, dominance_delta_db,
+    shot_hold, reestablish_interval, reestablish_hold,
+    audio_pre_roll, audio_post_roll,
+    mute_audio, log, fps,
+    enable_cross_cancel, cross_cancel_fir_taps,
+):
+    """Configurable pipeline: any number of people and cameras, custom person->camera mapping.
+
+    The camera rule: a person speaking alone -> their camera; people who share a
+    camera both speaking -> that shared shot; speakers on different cameras
+    overlapping (or silence) -> the wide (obshchak) shot.
+    """
+    from .prproj_patcher import patch_prproj, read_audio_offsets, segments_to_cuts
+    from .core.audio_loader import apply_offset
+
+    if wide_camera < 1:
+        raise click.BadParameter("Values are 1-based and must be >= 1", param_hint="--wide-camera")
+
+    parsed = [_parse_person_spec(s) for s in person_specs]
+
+    if mic_files and len(mic_files) != len(parsed):
+        raise click.BadParameter(
+            f"--mic given {len(mic_files)} time(s) but there are {len(parsed)} --person entries; "
+            "provide one --mic per person (in order) or none at all.",
+            param_hint="--mic",
+        )
+    mic_by_index = list(mic_files) if mic_files else [None] * len(parsed)
+
+    tracks = [track for (_lbl, track, _ang) in parsed]
+    if len(set(tracks)) != len(tracks):
+        raise click.BadParameter(
+            f"Audio tracks must be unique across people, got {tracks}",
+            param_hint="--person",
+        )
+
+    wide0 = wide_camera - 1
+
+    specs_for_resolve = [
+        (track - 1, label, mic_by_index[i])
+        for i, (label, track, _ang) in enumerate(parsed)
+    ]
+    resolved_mics, audio_sources_log, mute_ok = _resolve_speaker_mics(
+        in_file, seq, specs_for_resolve, xml_file
+    )
+    mute_audio = mute_audio and mute_ok
+
+    people = [
+        CustomPerson(
+            key=f"person_{i}",
+            label=label,
+            audio_track_index=track - 1,
+            camera_angle=angle - 1,
+        )
+        for i, (label, track, angle) in enumerate(parsed)
+    ]
+
+    analysis_config = ProjectConfig(
+        audio_inputs=[
+            AudioInput(
+                path=Path(resolved_mics[i]),
+                speaker_label=people[i].label,
+                camera_index=people[i].camera_angle,
+            )
+            for i in range(len(people))
+        ],
+        output_dir=Path(out_file).parent,
+        default_camera=wide0,
+        both_speaking_camera=wide0,
+        speech_threshold_db=speech_threshold,
+        release_threshold_db=release_threshold,
+        detector_backend=detector_backend,
+        vad_threshold=vad_threshold,
+        vad_min_speech_ms=vad_min_speech_ms,
+        vad_min_silence_ms=vad_min_silence_ms,
+        vad_speech_pad_ms=vad_speech_pad_ms,
+        input_gain_db=input_gain,
+        detection_min_on_s=min_speech_duration_ms / 1000.0,
+        detection_min_off_s=release_ms / 1000.0,
+        detection_hangover_s=hold_ms / 1000.0,
+        hangover_ms=hold_ms,
+        audio_pre_roll_s=audio_pre_roll,
+        audio_post_roll_s=audio_post_roll,
+    )
+    analysis_config.validate()
+
+    custom_config = CustomSwitchConfig(
+        wide_camera=wide0,
+        dominance_delta_db=dominance_delta_db,
+        shot_hold_s=shot_hold,
+        reestablish_interval_s=reestablish_interval,
+        reestablish_hold_s=reestablish_hold,
+        audio_pre_roll_s=audio_pre_roll,
+        audio_post_roll_s=audio_post_roll,
+        audio_recent_hold_s=hold_ms / 1000.0,
+    )
+
+    try:
+        offsets = read_audio_offsets(Path(in_file), seq)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - offsets are best-effort
+        click.echo(
+            f"Warning: could not read audio offsets for sequence '{seq}': {exc}. "
+            "Continuing with zero offsets."
+        )
+        offsets = {}
+
+    mic_paths = [Path(resolved_mics[i]) for i in range(len(people))]
+    click.echo(f"Loading audio: {', '.join(str(p) for p in mic_paths)}")
+    audio_arrays = load_and_align(mic_paths, analysis_config.sample_rate)
+    for idx, person in enumerate(people):
+        offset_s = offsets.get(person.audio_track_index, 0.0)
+        if offset_s > 0:
+            audio_arrays[idx] = apply_offset(audio_arrays[idx], offset_s, analysis_config.sample_rate)
+
+    max_len = max(len(arr) for arr in audio_arrays)
+    for idx, arr in enumerate(audio_arrays):
+        if len(arr) < max_len:
+            padded = np.zeros(max_len, dtype=np.float64)
+            padded[:len(arr)] = arr
+            audio_arrays[idx] = padded
+    duration_s = max_len / analysis_config.sample_rate
+    click.echo(f"Duration: {duration_s:.1f}s")
+
+    if enable_cross_cancel:
+        click.echo(
+            f"Cross-channel cancellation: fir_taps={cross_cancel_fir_taps}, "
+            f"channels={len(audio_arrays)}"
+        )
+        audio_arrays = list(
+            _maybe_apply_cross_cancel(
+                audio_arrays, analysis_config.sample_rate,
+                enabled=True, fir_taps=cross_cancel_fir_taps,
+            )
+        )
+
+    activities = {}
+    click.echo("Analyzing participant activity...")
+    for idx, person in enumerate(people):
+        activity = analyze_speaker(audio_arrays[idx], person.label, analysis_config, gain_db=input_gain)
+        diag = {}
+        detect_activity(activity, analysis_config, diagnostics=diag, audio=audio_arrays[idx])
+        activities[person.key] = activity
+        click.echo(
+            f"  {person.label}: {diag.get('active_seconds', 0.0)}s active / "
+            f"{diag.get('total_seconds', 0.0)}s total, backend={diag.get('detector_backend')}"
+        )
+
+    hop_s = analysis_config.hop_ms / 1000.0
+    plan = build_custom_plan(people, activities, hop_s, custom_config)
+    click.echo(f"Planning complete: {len(plan.camera_segments)} camera segments")
+
+    first_angle, cuts = segments_to_cuts(plan.camera_segments)
+    click.echo(f"Camera switches: {len(cuts)} cuts (first angle: {first_angle + 1})")
+
+    out = Path(out_file)
+    log_path = out.with_suffix(out.suffix + ".log.jsonl") if log else None
+    log_entries = [
+        {
+            "event": "build_info",
+            "package_version": __version__,
+            "planner_signature": "custom_v1_static_mapping",
+        },
+        {
+            "event": "custom_mapping",
+            "wide_camera_internal": wide0,
+            "people": plan.diagnostics.get("people", []),
+        },
+    ]
+    if audio_sources_log:
+        log_entries.append(audio_sources_log)
+
+    click.echo("Patching project...")
+    patch_prproj(
+        Path(in_file),
+        cuts,
+        seq,
+        out,
+        first_angle=first_angle,
+        audio_track_intervals_s=plan.audio_open_intervals_s if mute_audio else None,
+        log_path=log_path,
+        source_offset_s=0.0,
+        audio_source_offset_s=0.0,
+        audio_overlap_s=0.0,
+        audio_pre_roll_s=custom_config.audio_pre_roll_s,
+        audio_post_roll_s=custom_config.audio_post_roll_s,
         prelude_log_entries=log_entries if log else None,
         fps=fps,
     )

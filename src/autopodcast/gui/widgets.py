@@ -161,8 +161,86 @@ class SliderField(ctk.CTkFrame):
         return self._quantized(self.slider.get())
 
 
+class DynamicRowsField(ctk.CTkFrame):
+    """A table of repeatable rows for the custom mode (people / cameras).
+
+    Each row has one widget per column; rows can be added or removed with
+    buttons. ``get`` returns a list of dicts keyed by each column's ``key``.
+    """
+
+    def __init__(self, master, columns, add_label="➕ Добавить", initial_rows=1):
+        super().__init__(master, fg_color="transparent")
+        self._columns = list(columns)
+        self._rows: list[tuple[ctk.CTkFrame, dict]] = []
+        self.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew")
+        for ci, col in enumerate(self._columns):
+            ctk.CTkLabel(header, text=col.header, anchor="w").grid(
+                row=0, column=ci, sticky="w", padx=(0, 8)
+            )
+            header.grid_columnconfigure(ci, weight=1)
+
+        self._body = ctk.CTkFrame(self, fg_color="transparent")
+        self._body.grid(row=1, column=0, sticky="ew")
+        self._body.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(self, text=add_label, width=170, command=self.add_row).grid(
+            row=2, column=0, sticky="w", pady=(6, 0)
+        )
+
+        for _ in range(max(0, initial_rows)):
+            self.add_row()
+
+    def add_row(self, values: dict | None = None) -> None:
+        values = values or {}
+        row_frame = ctk.CTkFrame(self._body, fg_color="transparent")
+        row_frame.grid(row=len(self._rows), column=0, sticky="ew", pady=2)
+        getters: dict = {}
+        for ci, col in enumerate(self._columns):
+            row_frame.grid_columnconfigure(ci, weight=1)
+            default = values.get(col.key, col.default)
+            if col.kind == "bool":
+                var = ctk.BooleanVar(value=bool(default))
+                ctk.CTkCheckBox(row_frame, text="", variable=var).grid(
+                    row=0, column=ci, sticky="w", padx=(0, 8)
+                )
+                getters[col.key] = var.get
+            else:
+                entry = ctk.CTkEntry(row_frame)
+                if default not in (None, ""):
+                    entry.insert(0, str(default))
+                entry.grid(row=0, column=ci, sticky="ew", padx=(0, 8))
+                getters[col.key] = (lambda e=entry: e.get().strip())
+        ctk.CTkButton(
+            row_frame, text="✕", width=32,
+            fg_color="#a0392e", hover_color="#7d2c24",
+            command=lambda rf=row_frame: self.remove_row(rf),
+        ).grid(row=0, column=len(self._columns), padx=(4, 0))
+        self._rows.append((row_frame, getters))
+
+    def remove_row(self, row_frame) -> None:
+        for i, (rf, _g) in enumerate(self._rows):
+            if rf is row_frame:
+                rf.destroy()
+                self._rows.pop(i)
+                break
+
+    def get(self) -> list[dict]:
+        return [
+            {key: getter() for key, getter in getters.items()}
+            for _rf, getters in self._rows
+        ]
+
+
 def make_field_widget(master, fld: Field) -> tuple[ctk.CTkBaseClass, Callable[[], object]]:
     """Create the input widget for a Field and return (widget, getter)."""
+    if fld.kind == "rows":
+        initial = 2 if fld.arg == "--camera" else 1
+        w = DynamicRowsField(master, columns=fld.columns, initial_rows=initial)
+        return w, w.get
+
     if fld.kind == "file":
         w = FileField(master, file_filter=fld.file_filter, hint=fld.hint)
         return w, w.get

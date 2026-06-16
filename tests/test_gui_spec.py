@@ -15,12 +15,26 @@ from autopodcast.gui.spec import (
 )
 
 
+def _default_rows(f):
+    """Minimal valid rows for a 'rows' field so the custom mode builds cleanly."""
+    if f.arg == "--camera":
+        return [
+            {"angle": 1, "label": "wide", "wide": True},
+            {"angle": 2, "label": "cam2", "wide": False},
+        ]
+    if f.arg == "--person":
+        return [{"label": "A", "track": 1, "camera": 1}]
+    return []
+
+
 def _filled(spec, **overrides):
     """Build a values dict with every field at its default (required fields
     get a plausible path/name), then apply overrides."""
     vals = {}
     for f in spec.fields:
-        if f.kind == "bool":
+        if f.kind == "rows":
+            vals[f.arg] = _default_rows(f)
+        elif f.kind == "bool":
             vals[f.arg] = f.default
         elif f.required:
             if f.arg == "--in":
@@ -52,7 +66,7 @@ class TestBuildArgvDefaults:
         assert argv[out_idx + 1].endswith(spec.out_suffix + ".prproj")
         # no optional/advanced flag leaked through at default values
         for f in spec.fields:
-            if not f.required and f.kind != "bool":
+            if not f.required and f.kind not in ("bool", "rows"):
                 assert f.arg not in argv, f"{f.arg} leaked at default"
 
     def test_multicam_default_argv_exact(self):
@@ -160,6 +174,100 @@ class TestBuildArgvOutput:
         assert "--mic-a" in argv
         assert argv[argv.index("--mic-a") + 1] == "/proj/a.wav"
 
+
+# ---------------------------------------------------------------------------
+# build_argv — custom "Конструктор" mode (dynamic people/cameras tables)
+# ---------------------------------------------------------------------------
+
+
+class TestCustomMode:
+    def _user_setup(self, **overrides):
+        """The user's example: 4 people, guests 1+2 share a camera, общак = cam1."""
+        spec = mode_by_key("custom")
+        vals = _filled(spec, **{
+            "--camera": [
+                {"angle": 1, "label": "общак", "wide": True},
+                {"angle": 2, "label": "ведущий", "wide": False},
+                {"angle": 3, "label": "гости1+2", "wide": False},
+                {"angle": 4, "label": "гость3", "wide": False},
+            ],
+            "--person": [
+                {"label": "ведущий", "track": 1, "camera": 2},
+                {"label": "гость1", "track": 2, "camera": 3},
+                {"label": "гость2", "track": 3, "camera": 3},
+                {"label": "гость3", "track": 4, "camera": 4},
+            ],
+        })
+        vals.update(overrides)
+        return spec, vals
+
+    def test_people_expand_to_person_flags_in_order(self):
+        spec, vals = self._user_setup()
+        argv = build_argv(spec, vals)
+        assert argv[0] == "auto-switch-custom"
+        persons = [argv[i + 1] for i, a in enumerate(argv) if a == "--person"]
+        assert persons == ["ведущий:1:2", "гость1:2:3", "гость2:3:3", "гость3:4:4"]
+
+    def test_wide_camera_from_checkbox(self):
+        spec, vals = self._user_setup()
+        argv = build_argv(spec, vals)
+        assert argv[argv.index("--wide-camera") + 1] == "1"
+
+    def test_out_is_derived(self):
+        spec, vals = self._user_setup(**{"--in": "/a/b/Эпизод.prproj"})
+        argv = build_argv(spec, vals)
+        assert argv[argv.index("--out") + 1] == "/a/b/Эпизод_custom.prproj"
+
+    def test_requires_exactly_one_wide(self):
+        spec, vals = self._user_setup(**{"--camera": [
+            {"angle": 1, "label": "a", "wide": True},
+            {"angle": 2, "label": "b", "wide": True},
+        ]})
+        with pytest.raises(ValueError, match="общак"):
+            build_argv(spec, vals)
+
+    def test_requires_at_least_one_person(self):
+        spec, vals = self._user_setup(**{"--person": []})
+        with pytest.raises(ValueError, match="человек"):
+            build_argv(spec, vals)
+
+    def test_person_camera_must_be_declared(self):
+        spec, vals = self._user_setup(**{"--person": [
+            {"label": "X", "track": 1, "camera": 9},
+        ]})
+        with pytest.raises(ValueError, match="не объявлена"):
+            build_argv(spec, vals)
+
+    def test_label_with_colon_rejected(self):
+        spec, vals = self._user_setup(**{"--person": [
+            {"label": "a:b", "track": 1, "camera": 2},
+        ]})
+        with pytest.raises(ValueError, match="':'"):
+            build_argv(spec, vals)
+
+    def test_incomplete_row_rejected(self):
+        spec, vals = self._user_setup(**{"--person": [
+            {"label": "ведущий", "track": "", "camera": 2},
+        ]})
+        with pytest.raises(ValueError, match="заполните"):
+            build_argv(spec, vals)
+
+    def test_advanced_defaults_not_leaked(self):
+        spec = mode_by_key("custom")
+        argv = build_argv(spec, _filled(spec))
+        for arg in ("--shot-hold", "--reestablish-interval", "--vad-threshold", "--xml"):
+            assert arg not in argv
+
+    def test_advanced_changed_is_emitted(self):
+        spec, vals = self._user_setup(**{"--shot-hold": 2.5})
+        argv = build_argv(spec, vals)
+        assert argv[argv.index("--shot-hold") + 1] == "2.5"
+
+    def test_mute_audio_off_emits_flag(self):
+        spec, vals = self._user_setup(**{"--mute-audio": False})
+        argv = build_argv(spec, vals)
+        assert "--no-mute-audio" in argv
+
     def test_4cams_optional_mics_omitted_when_empty(self):
         """auto-switch-4cams mics are optional (auto-resolved) — empty -> not in argv."""
         spec = mode_by_key("4cams")
@@ -224,14 +332,24 @@ class TestSpecMatchesCli:
     def test_every_field_arg_is_a_real_cli_option(self, spec):
         command = cli.commands[spec.cmd]
         for f in spec.fields:
+            if f.kind == "rows":
+                continue  # virtual GUI table (people/cameras), not a single CLI option
             assert _find_param(command, f.arg) is not None, (
                 f"{spec.cmd}: field {f.arg} is not a CLI option"
             )
+
+    def test_custom_tables_map_to_real_cli_options(self):
+        """The custom mode's tables expand to --person / --wide-camera, which must exist."""
+        command = cli.commands["auto-switch-custom"]
+        assert _find_param(command, "--person") is not None
+        assert _find_param(command, "--wide-camera") is not None
 
     @pytest.mark.parametrize("spec", MODES, ids=[m.key for m in MODES])
     def test_field_defaults_match_cli_defaults(self, spec):
         command = cli.commands[spec.cmd]
         for f in spec.fields:
+            if f.kind == "rows":
+                continue  # virtual GUI table — expanded by _build_custom_argv
             param = _find_param(command, f.arg)
             if f.required:
                 continue  # required options have no meaningful default

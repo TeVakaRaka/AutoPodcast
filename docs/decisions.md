@@ -14,6 +14,28 @@ investigations did *not* lead to code. Newest first. Dates are approximate
 
 ## Decisions
 
+### "Конструктор" — a configurable N-people / M-cameras mode (`auto_switch_custom.py`, `cli.py`, `gui/*`)
+**2026-06-16 · branch `claude/awesome-pike-256a34` (off `claude/release-build`).** The presets
+hard-code the cast (1+3, 2+1, …); the user wanted a *сборная* version where you set how many
+people there are, each one's audio track and camera, and how many cameras — configured in the GUI
+"по кнопочкам". Added a fifth, **additive** mode (presets untouched). New pure planner
+`core/auto_switch_custom.py` with one generalizing rule: per frame, take the dominance-filtered
+active speaker set → all on one camera ⇒ that camera (solo close-up **or** a shared pair shot like
+guests 1+2); on ≥2 cameras, or silence ⇒ the wide/общак. Static mapping, no moving close-up;
+`shot-hold` (min camera duration) absorbs brief pauses/overlaps/interjections so the camera holds.
+Reused as-is: `_resolve_speaker_mics`, the analyze/detect stack, `segments_to_cuts`, `patch_prproj`
+(its `audio_track_intervals_s` is already per-track / N-capable), and the role-agnostic
+`build_audio_plan` (imported from `auto_switch_4cams`, not duplicated). CLI `auto-switch-custom`
+mirrors the 4-cam command: repeatable `--person "label:track:camera"` (1-based) + `--wide-camera`;
+ASCII-only help (the `test_cli_ascii` guard). GUI: a new `Field(kind="rows")` + `DynamicRowsField`
+add/remove tables for people and cameras; `build_argv` special-cases the custom mode to expand them
+into `--person`/`--wide-camera` (all the testable logic stays in pure `spec.py`). Tests:
+`test_auto_switch_custom.py` (rule + the user's 4-person case + stability + audio), `test_custom_cli.py`
+(parse/validation), and custom cases in `test_gui_spec.py`. **Caveat:** the GUI window can't run on
+this dev Mac (Homebrew Python has no Tk) — engine + `spec.py` are verified headless; verify the
+window itself on the Windows build. Pre-existing unrelated failure left as-is:
+`test_monologue_2cam.py::...motion_guard_smoke` (fails on pristine `release-build` too).
+
 ### SAKHA camera: a fragmented host turn no longer swallowed by the guest (`sakha_aimakh.py`)
 **2026-06-02 · `d7da9a5`.** On the real 20.05 Саха recording (studio mode) the camera sat on the
 guest ~1892–1905 s even though the host's mic was open and the host spoke ~1896.5–1901 s — the

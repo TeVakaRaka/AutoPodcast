@@ -148,6 +148,8 @@ class AutoPodcastApp(ctk.CTk):
             row = self._add_field_row(self.form, fld, row)
 
     def _add_field_row(self, parent, fld, row: int) -> int:
+        if fld.kind == "rows":
+            return self._add_rows_field(parent, fld, row)
         text = fld.label + ("  *" if fld.required else "")
 
         if fld.hint and fld.kind != "file":
@@ -176,6 +178,27 @@ class AutoPodcastApp(ctk.CTk):
             if entry is not None:
                 self._default_borders[fld.arg] = entry.cget("border_color")
         return row + 1
+
+    def _add_rows_field(self, parent, fld, row: int) -> int:
+        """Full-width dynamic table (custom mode people / cameras)."""
+        lbl_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        lbl_frame.grid(row=row, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(12, 2))
+        ctk.CTkLabel(
+            lbl_frame, text=fld.label, anchor="w", font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left")
+        if fld.hint:
+            icon = ctk.CTkLabel(
+                lbl_frame, text=" ⓘ",
+                text_color="#6a9ecf", font=ctk.CTkFont(size=12), anchor="w",
+            )
+            icon.pack(side="left")
+            Tooltip(icon, fld.hint)
+
+        widget, getter = make_field_widget(parent, fld)
+        widget.grid(row=row + 1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        parent.grid_columnconfigure(1, weight=1)
+        self._getters[fld.arg] = getter
+        return row + 2
 
     # ------------------------------------------------------------ validation
 

@@ -30,6 +30,7 @@ src/autopodcast/
     monologue_sources  source resolution for the monologue layout
     auto_switch_4cams  planner: 1 host + 3 guests, 4 cameras
     sakha_aimakh     planner: 2 hosts + 1 guest (the largest planner)
+    auto_switch_custom planner: configurable N people / M cameras ("Конструктор")
     audio_sources    resolve source audio files from a .prproj / FCP 7 XML
 
   models/            dataclasses only — domain.py, project.py
@@ -49,6 +50,11 @@ src/autopodcast/
 | `auto-switch-4cams` | 1 host + 3 guests, 4 cams | `auto_switch_4cams` |
 | `auto-switch-sakha-aimakh` | 2 hosts + 1 guest | `sakha_aimakh` |
 | `auto-switch-monologue` | 1 narrator, 2 cams | `monologue_2cam` |
+| `auto-switch-custom` | any N people / M cameras (configurable) | `auto_switch_custom` |
+
+The first four are fixed presets. `auto-switch-custom` ("Конструктор") generalizes
+them: you declare the cast and cameras yourself and map each person to a camera.
+See [docs/custom-mode.md](custom-mode.md).
 
 ## Data flow
 
