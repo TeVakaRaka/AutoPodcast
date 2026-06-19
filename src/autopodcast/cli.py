@@ -901,7 +901,6 @@ def _resolve_speaker_mics(in_file, seq, specs, xml_file):
 @click.option("--cooldown", default=0.9, type=float, help="Minimum time between video cuts in seconds")
 @click.option("--silence-timeout", default=0.9, type=float, help="Silence timeout before switching to full wide")
 @click.option("--cam3-wait-timeout", default=0.0, type=float, help="Camera 3 reposition delay in seconds (0 = switch immediately)")
-@click.option("--cam3-cut-in-grace", default=0.15, type=float, help="Grace window to cut into ready camera 3")
 @click.option("--attenuation-level", default=-18.0, type=float, help="Target dB for inactive but not yet hard-muted speakers")
 @click.option("--standby-level", default=-9.0, type=float, help="Target dB for recently active speakers")
 @click.option("--hard-mute-timeout", default=2.0, type=float, help="Seconds before inactive speaker is fully muted")
@@ -927,7 +926,7 @@ def auto_switch_4cams_cmd(
     input_gain, input_gain_host, input_gain_guest_1, input_gain_guest_2, input_gain_guest_3,
     detector_backend, vad_threshold, vad_min_speech_ms, vad_min_silence_ms, vad_speech_pad_ms,
     min_speech_duration_ms, release_ms, hold_ms, dominance_delta_db,
-    shot_hold, cooldown, silence_timeout, cam3_wait_timeout, cam3_cut_in_grace,
+    shot_hold, cooldown, silence_timeout, cam3_wait_timeout,
     attenuation_level, standby_level, hard_mute_timeout,
     audio_pre_roll, audio_post_roll,
     reestablish_wide_interval, reestablish_wide_duration, reestablish_min_turns,
@@ -1014,7 +1013,6 @@ def auto_switch_4cams_cmd(
         cooldown_s=cooldown,
         silence_timeout_s=silence_timeout,
         cam3_wait_timeout_s=cam3_wait_timeout,
-        cam3_cut_in_grace_s=cam3_cut_in_grace,
         audio_hard_mute_timeout_s=hard_mute_timeout,
         audio_pre_roll_s=audio_pre_roll,
         audio_post_roll_s=audio_post_roll,
@@ -1239,7 +1237,6 @@ def auto_switch_4cams_cmd(
             "host_return_min_s": roundtable_config.host_return_min_s,
             "silence_timeout_s": roundtable_config.silence_timeout_s,
             "cam3_wait_timeout_s": roundtable_config.cam3_wait_timeout_s,
-            "cam3_cut_in_grace_s": roundtable_config.cam3_cut_in_grace_s,
             "guest_close_min_domination_s": roundtable_config.guest_close_min_domination_s,
             "guest_close_min_duration_s": roundtable_config.guest_close_min_duration_s,
             "guest_close_max_continuous_s": roundtable_config.guest_close_max_continuous_s,

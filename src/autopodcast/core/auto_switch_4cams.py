@@ -54,9 +54,6 @@ class Roundtable4CamConfig:
     silence_timeout_s: float = 0.9
     cam3_wait_timeout_s: float = 0.0
     cam3_min_useful_after_ready_s: float = 0.75
-    cam3_recent_turn_window_s: float = 3.0
-    cam3_max_recent_turns: int = 2
-    cam3_cut_in_grace_s: float = 0.15
     reestablish_all_wide_interval_s: float = 25.0
     reestablish_all_wide_duration_s: float = 1.8
     reestablish_min_turns: int = 3
@@ -99,8 +96,6 @@ class Roundtable4CamConfig:
             ("overlap_min_hold_s", self.overlap_min_hold_s),
             ("silence_timeout_s", self.silence_timeout_s),
             ("cam3_min_useful_after_ready_s", self.cam3_min_useful_after_ready_s),
-            ("cam3_recent_turn_window_s", self.cam3_recent_turn_window_s),
-            ("cam3_cut_in_grace_s", self.cam3_cut_in_grace_s),
             ("reestablish_all_wide_interval_s", self.reestablish_all_wide_interval_s),
             ("reestablish_all_wide_duration_s", self.reestablish_all_wide_duration_s),
             ("guest_close_min_domination_s", self.guest_close_min_domination_s),
@@ -131,8 +126,6 @@ class Roundtable4CamConfig:
                 raise ValueError(f"{name} must be positive, got {value}")
         if self.cam3_wait_timeout_s < 0:
             raise ValueError(f"cam3_wait_timeout_s must be >= 0, got {self.cam3_wait_timeout_s}")
-        if self.cam3_max_recent_turns < 0:
-            raise ValueError("cam3_max_recent_turns must be >= 0")
         if self.reestablish_min_turns < 1:
             raise ValueError("reestablish_min_turns must be >= 1")
         if self.all_overlap_min_islands < 1:

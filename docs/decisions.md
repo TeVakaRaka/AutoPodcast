@@ -14,6 +14,18 @@ investigations did *not* lead to code. Newest first. Dates are approximate
 
 ## Decisions
 
+### Removed dead `cam3_*` config from `auto_switch_4cams` (`auto_switch_4cams.py`, `cli.py`)
+**2026-06-16 · branch `claude/awesome-pike-256a34`.** The 2026-06 audit flagged dead `cam3_*`
+config; confirmed by a usage grep. Removed the three fields no planner logic ever reads:
+`cam3_cut_in_grace_s` (worst case — a user-facing `--cam3-cut-in-grace` CLI knob + config + JSONL
+log entry, plumbed end-to-end but never read → did nothing), `cam3_recent_turn_window_s`, and
+`cam3_max_recent_turns` (config + `validate()` only). **Kept** `cam3_wait_timeout_s` (read at the
+guest-accent timing, line ~972) and `cam3_min_useful_after_ready_s` (read in the guest-close
+`min_useful` max(), line ~963) — these are still live. No GUI/test referenced the removed fields.
+519 tests pass (pre-existing `test_monologue_2cam ...motion_guard_smoke` still fails on pristine
+release-build). The deeper "cam3 = physically moving camera that needs settle time" model is still
+only partly realized — full rework remains Open work.
+
 ### Docs revision: code map + unified multicam-logic doc; pruned stale roadmap (`docs/*`)
 **2026-06-16 · branch `claude/awesome-pike-256a34`.** Documentation-only pass. Added
 `docs/code-map.md` (per-module reference + per-mode call chains — and corrected the common
@@ -187,7 +199,8 @@ detector change.
 - Bring weaker modes toward `sakha_aimakh` (2026-06-02 audit): a real de-bleed/source-owner
   detector for `auto_switch_4cams` (currently bare envelope dominance); a motion guard for the
   2-speaker `camera_scheduler` path; port momentum, hold-through-brief-silence, max-visible-hold,
-  and the choppy-run consolidator to the other multicam modes; remove the dead `cam3_*` config.
+  and the choppy-run consolidator to the other multicam modes. (The 3 truly-dead `cam3_*` fields
+  were removed 2026-06-16; finishing or dropping the cam3 "moving camera" model is still open.)
 - Studio audio decision holds the guest mic open while the host talks (the 1896 s
   host-suppression / t=364-class hot-guest-bleed bug) — the `experiments/` bake-off.
 - Full `.prproj` size fix: volume keyframes instead of physical audio cuts.
