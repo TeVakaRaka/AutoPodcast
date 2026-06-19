@@ -1,4 +1,10 @@
-# Algorithm
+# Base 2-speaker pipeline (analyze / auto-multicam)
+
+The original RMS + hysteresis pipeline for the **2-speaker** path (`analyze`,
+`auto-multicam`), via `switcher` / `camera_scheduler` / `ducking`. The N-person
+multicam planners (4cams / SAKHA / Конструктор) and their shared editorial
+rules live in [multicam-logic.md](multicam-logic.md); the full module reference
+is in [code-map.md](code-map.md).
 
 ## Pipeline Stages
 

@@ -6,7 +6,7 @@ Targets Premiere Pro (FCP 7 XML round-trip + `.prproj` patching + ExtendScript).
 
 ## Stack
 - Python 3.10+, numpy<2.0, soundfile, click
-- Optional: torch + silero-vad (auto-detected via `--detector-backend silero`)
+- Optional: silero-vad ONNX (CPU) backend (auto-detected via `--detector-backend silero`)
 - Export: FCP 7 XML, JSON timeline, ExtendScript `.jsx`, patched `.prproj`
 - Use `python3` (no `python` binary on this Mac)
 
@@ -15,7 +15,8 @@ Targets Premiere Pro (FCP 7 XML round-trip + `.prproj` patching + ExtendScript).
   - Base: `analyzer`, `audio_loader`, `detector` (rms/silero), `segmenter`, `switcher`, `ducking`
   - Bleed: `cross_cancel` — Wiener-Hopf mic-bleed cancellation, runs before the detector
   - Infra: `camera_motion`, `motion_cache`, `camera_scheduler`, `calibrator`, `roles`
-  - Mode planners: `monologue_2cam` + `monologue_sources`, `auto_switch_4cams`, `sakha_aimakh`
+  - Mode planners: `monologue_2cam` + `monologue_sources`, `auto_switch_4cams`, `sakha_aimakh`,
+    `auto_switch_custom` (configurable N-people / M-cameras — the "Конструктор" mode)
   - Premiere I/O: `audio_sources` (resolves source files from `.prproj` / FCP 7 XML)
 - `src/autopodcast/models/` — dataclasses (`domain.py`, `project.py`)
 - `src/autopodcast/export/` — `fcp7xml.py`, `json_export.py`, `multicam_jsx.py`
@@ -23,9 +24,10 @@ Targets Premiere Pro (FCP 7 XML round-trip + `.prproj` patching + ExtendScript).
 - `src/autopodcast/prproj_patcher.py` — parse/patch binary `.prproj` (gunzip + XML)
 - `src/autopodcast/import_xml.py` — read FCP 7 XML back into Timeline
 - `src/autopodcast/cli.py` + `__main__.py` — Click group with mode subcommands
-- `src/autopodcast/gui/` — customtkinter desktop GUI covering all four modes
+- `src/autopodcast/gui/` — customtkinter desktop GUI covering all five modes
 
-Full module map and data flow: [docs/architecture.md](docs/architecture.md).
+Full module map and data flow: [docs/architecture.md](docs/architecture.md);
+per-module reference: [docs/code-map.md](docs/code-map.md).
 
 ## CLI modes
 ```bash
@@ -34,6 +36,7 @@ python3 -m autopodcast analyze --help                  # base 2-track planner
 python3 -m autopodcast auto-switch-monologue --help    # 1 speaker, 2 cameras
 python3 -m autopodcast auto-switch-4cams --help        # 1 host + 3 guests, 4 cams
 python3 -m autopodcast auto-switch-sakha-aimakh --help # 2 hosts + 1 guest
+python3 -m autopodcast auto-switch-custom --help       # configurable: any N people / M cameras
 ```
 
 ## SAKHA AYMAKH mode notes
@@ -66,7 +69,7 @@ A standalone `autopodcast.exe` is produced via PyInstaller (`build.spec`). See
 
 ## GUI
 Double-clicking the exe (or `python3 -m autopodcast gui`) opens a customtkinter
-window covering all four modes. It builds an `autopodcast` CLI command from the
+window covering all five modes. It builds an `autopodcast` CLI command from the
 form and runs it as a subprocess — it never reimplements pipeline logic.
 "Creative" numeric parameters (tempo, cut frequency, camera share, detector
 thresholds) are sliders. Form fields are declared in `gui/spec.py`; defaults
@@ -82,12 +85,16 @@ Actions — see [docs/build-and-ci.md](docs/build-and-ci.md).
 
 ## Documentation (read these first in a new session)
 - [docs/architecture.md](docs/architecture.md) — module map, data flow, design principles
+- [docs/code-map.md](docs/code-map.md) — per-module reference + per-mode call chains
+- [docs/multicam-logic.md](docs/multicam-logic.md) — cross-mode editorial logic (sakha-derived):
+  attribution, camera rules (overlap→общак, shared shot, fragmented solo→close-up), stability
 - [docs/decisions.md](docs/decisions.md) — what changed and why; investigations that did
-  NOT lead to code (read this to avoid re-debugging settled questions)
+  NOT lead to code (read this to avoid re-debugging settled questions) + Open/future work
 - [docs/gui.md](docs/gui.md) — the GUI: structure, how to add fields/modes
 - [docs/build-and-ci.md](docs/build-and-ci.md) — PyInstaller build + GitHub Actions
-- [docs/algorithm.md](docs/algorithm.md) — base RMS/hysteresis pipeline
+- [docs/algorithm.md](docs/algorithm.md) — base 2-speaker (analyze / auto-multicam) pipeline
 - [docs/auto-switching-spec-4cams.md](docs/auto-switching-spec-4cams.md) — canonical 4-cam spec
+- [docs/custom-mode.md](docs/custom-mode.md) — the "Конструктор" configurable N-people/M-cameras mode
 
 **Keep the log current.** Whenever you change code, append an entry to
 [docs/decisions.md](docs/decisions.md) (newest first): what changed, where (file/function),

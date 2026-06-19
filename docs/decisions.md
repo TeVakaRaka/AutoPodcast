@@ -14,6 +14,18 @@ investigations did *not* lead to code. Newest first. Dates are approximate
 
 ## Decisions
 
+### Docs revision: code map + unified multicam-logic doc; pruned stale roadmap (`docs/*`)
+**2026-06-16 · branch `claude/awesome-pike-256a34`.** Documentation-only pass. Added
+`docs/code-map.md` (per-module reference + per-mode call chains — and corrected the common
+misreading that the multicam planners use `combine_speakers`; they consume the per-person
+`activities` dict directly) and `docs/multicam-logic.md` (the cross-mode editorial logic
+refined in `sakha_aimakh`: attribution incl. the studio leak-matrix, the camera rules
+overlap→общак / shared-shot / fragmented-solo→close-up / never-the-lone-pair-shot,
+stability, audio plan, per-mode realization). Reframed `algorithm.md` as the *base
+2-speaker* pipeline (it only ever described `analyze` / `auto-multicam`). Deleted the stale
+initial-commit `roadmap.md` (live ideas folded into Open work below; the rest was done or
+superseded). Updated the CLAUDE.md doc index + architecture.md links. No code changed.
+
 ### Конструктор: studio leak-suppression + macOS GUI build & synthetic e2e (`auto_switch_custom.py`, `cli.py`, `gui/*`)
 **2026-06-16 · branch `claude/awesome-pike-256a34`.** Follow-up to the entry below. (1) Wired SAKHA's
 well-tuned **studio leak-matrix** attribution into the custom planner instead of only the plain
@@ -183,3 +195,6 @@ detector change.
   tested so far).
 - Optionally port the SAKHA debleed layers into `auto-multicam`.
 - GUI: drag-drop (deferred — `tkinterdnd2` + PyInstaller is fragile).
+- Someday/maybe (folded from the old `roadmap.md`): EDL export for other NLEs; a
+  waveform/timeline preview before export; a quick ffmpeg-concat preview without an NLE;
+  listener reaction-shot inserts during long monologues.

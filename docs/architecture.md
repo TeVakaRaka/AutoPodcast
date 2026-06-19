@@ -5,6 +5,10 @@ analyses per-speaker microphone tracks, decides which camera to show and
 which mics to keep open, and writes the result back into a Premiere Pro
 project (`.prproj`) or an FCP 7 XML.
 
+See also: [code-map.md](code-map.md) (per-module reference + call chains),
+[multicam-logic.md](multicam-logic.md) (the cross-mode editorial logic),
+[algorithm.md](algorithm.md) (the base 2-speaker pipeline).
+
 ## Module map
 
 ```
